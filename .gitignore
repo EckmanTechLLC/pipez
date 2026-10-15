@@ -1,0 +1,8 @@
+.env
+.venv/
+pipez.sqlite3*
+pipez.log
+__pycache__/
+nohup.out
+artifacts/
+.odin/index-cache.json

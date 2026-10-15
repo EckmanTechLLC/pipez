@@ -1,0 +1,6 @@
+#cloud-config
+# Light vendor-data carried by template 9001; clones do not re-run installs.
+package_update: false
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+  - systemctl enable --now ttyd

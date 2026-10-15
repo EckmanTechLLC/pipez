@@ -1,0 +1,1207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PIPEZ</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<style>
+  :root {
+    --bg: #ffffff; --panel: #f4f6f8; --border: #d9dee4; --text: #1e2630;
+    --dim: #68737f; --accent: #0b6fd6; --accent-soft: #e8f1fb;
+    --pending: #68737f; --running: #a06b00; --done: #1a8f3c; --failed: #c62828;
+    --mono: "JetBrains Mono", "Fira Mono", ui-monospace, monospace;
+    --sans: system-ui, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 13px/1.45 var(--mono); display: flex; flex-direction: column; }
+  header { display: flex; align-items: baseline; gap: 14px; padding: 12px 18px 8px; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: 2px; color: var(--accent); }
+  header .sub { color: var(--dim); font-size: 11px; }
+  #controls { display: flex; gap: 8px; padding: 0 18px 6px; }
+  #req { flex: 1; background: #fff; border: 1px solid var(--border);
+         color: var(--text); padding: 8px 10px; font: inherit; border-radius: 4px; }
+  button { background: var(--accent); color: #fff; border: 0; padding: 8px 16px;
+           font: inherit; font-weight: 700; border-radius: 4px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  select { background: #fff; color: var(--text); border: 1px solid var(--border);
+           font: inherit; padding: 8px; border-radius: 4px; max-width: 340px; }
+  #ctxwrap { padding: 0 18px 8px; }
+  #ctx { width: 100%; min-height: 42px; background: #fff; border: 1px solid var(--border);
+         color: var(--text); padding: 8px 10px; font: inherit; border-radius: 4px;
+         resize: vertical; }
+  #baselabel { display: block; margin-top: 4px; color: var(--dim); font-size: 12px;
+               cursor: pointer; }
+  #runstate { padding: 4px 18px 8px; color: var(--dim); font-size: 12px; }
+  .err { color: var(--failed); }
+  .art { margin-left: 8px; }
+  .art a { color: var(--accent); text-decoration: none; }
+  .art a:hover { text-decoration: underline; }
+  .verify-btn { padding: 1px 8px; font-size: 11px; font-weight: 400;
+                background: var(--panel); color: var(--accent);
+                border: 1px solid var(--border); }
+
+  #main { flex: 1; display: flex; min-height: 0; border-top: 1px solid var(--border); }
+  #left { flex: 1; min-width: 0; overflow: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--border);
+           white-space: nowrap; }
+  th { color: var(--dim); font-weight: 400; font-size: 11px; text-transform: uppercase;
+       letter-spacing: 1px; position: sticky; top: 0; background: var(--bg); z-index: 1; }
+  td.title { white-space: normal; min-width: 260px; }
+  .role { color: var(--dim); font-size: 11px; margin-right: 8px; }
+  .status { font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+  .s-pending { color: var(--pending); }
+  .s-running, .s-synthesizing, .s-provisioning, .s-deploying { color: var(--running); }
+  .s-awaiting_children { color: #4a6a8a; }
+  .s-done { color: var(--done); }
+  .s-failed { color: var(--failed); }
+  .s-cancelled { color: var(--dim); }
+
+  .s-running::after, .s-synthesizing::after {
+    content: "▌"; animation: blink 1s step-start infinite; margin-left: 4px; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .num { text-align: right; color: var(--dim); }
+  tr.task { cursor: pointer; }
+  tr.task:hover { background: var(--panel); }
+  tr.task.selected { background: var(--accent-soft); }
+
+  #panel { width: 46%; min-width: 380px; border-left: 1px solid var(--border);
+           overflow-y: auto; display: none; background: #fff; }
+  #panel.open { display: block; }
+  #panel-inner { padding: 16px 22px 40px; font-family: var(--sans); font-size: 14px; }
+  #panel-head { position: sticky; top: 0; background: #fff; padding: 10px 0;
+                border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+  #panel-head .role-chip { display: inline-block; background: var(--panel);
+      border: 1px solid var(--border); border-radius: 10px; padding: 1px 9px;
+      font: 11px var(--mono); color: var(--dim); margin-right: 8px; }
+  #panel-head h2 { font-size: 15px; margin: 6px 0 4px; }
+  #panel-head .meta { font: 11px var(--mono); color: var(--dim); }
+  #panel-head .close { float: right; background: none; color: var(--dim);
+      font-size: 16px; padding: 0 6px; }
+  .section-label { font: 11px var(--mono); text-transform: uppercase;
+      letter-spacing: 1px; color: var(--accent); margin: 18px 0 6px; }
+  details { margin: 12px 0; }
+  details summary { font: 11px var(--mono); text-transform: uppercase;
+      letter-spacing: 1px; color: var(--dim); cursor: pointer; }
+  details pre { white-space: pre-wrap; font: 12px var(--mono); background: var(--panel);
+      padding: 10px; border-radius: 4px; overflow-x: auto; }
+
+  .md { line-height: 1.55; }
+  .md h1 { font-size: 18px; margin: 14px 0 8px; }
+  .md h2 { font-size: 16px; margin: 14px 0 6px; }
+  .md h3 { font-size: 14px; margin: 12px 0 4px; }
+  .md h4, .md h5 { font-size: 13px; margin: 10px 0 4px; }
+  .md p { margin: 6px 0; }
+  .md ul, .md ol { margin: 6px 0; padding-left: 22px; }
+  .md li { margin: 2px 0; }
+  .md code { font: 12px var(--mono); background: var(--panel); padding: 1px 4px;
+             border-radius: 3px; }
+  .md pre { background: var(--panel); padding: 10px; border-radius: 4px;
+            overflow-x: auto; }
+  .md pre code { background: none; padding: 0; }
+  .md table { border-collapse: collapse; margin: 8px 0; font-size: 13px;
+              display: block; overflow-x: auto; max-width: 100%; }
+  .md th, .md td { border: 1px solid var(--border); padding: 4px 9px;
+                   white-space: normal; }
+  .md th { background: var(--panel); position: static; font-weight: 600;
+           color: var(--text); text-transform: none; letter-spacing: 0; }
+  .md blockquote { border-left: 3px solid var(--border); margin: 8px 0;
+                   padding: 2px 12px; color: var(--dim); }
+  .md a { color: var(--accent); }
+  .md hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
+
+  #facts-table { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+  #facts-table th, #facts-table td { border: 1px solid var(--border);
+      padding: 4px 9px; white-space: normal; vertical-align: top; }
+  #facts-table th { background: var(--panel); font-weight: 600; position: static;
+      text-transform: none; letter-spacing: 0; color: var(--text); }
+  #facts-table a { color: var(--accent); word-break: break-all; }
+
+  .s-intake, .s-briefing, .s-planning { color: #4a6a8a; }
+  .s-awaiting_plan { color: #7b3fb0; }
+  .s-awaiting_human { color: var(--accent); }
+  .s-intake::after, .s-briefing::after, .s-planning::after { content: "▌"; animation: blink 1s step-start infinite; margin-left: 4px; }
+  .s-awaiting_human::after { content: " ●"; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .2; } }
+
+  #waiting { padding: 12px 18px 18px; font-family: var(--sans); font-size: 14px;
+             border: 2px solid var(--accent); margin: 10px 18px; border-radius: 6px;
+             animation: glow 2s ease-in-out infinite; }
+  #waiting h3 { font-size: 13px; margin: 0 0 4px; text-transform: uppercase; letter-spacing: 1px; }
+  #waiting .tname { color: var(--dim); font-size: 12.5px; }
+  #waiting textarea { width: 100%; box-sizing: border-box; margin-top: 6px; font: inherit; }
+  #waiting .actions { margin-top: 10px; display: flex; gap: 10px; align-items: center; }
+  .stop-btn { color: var(--failed); border-color: var(--failed); }
+  #intake { padding: 14px 18px 40px; font-family: var(--sans); font-size: 14px;
+            border: 2px solid var(--accent); margin: 10px 18px; border-radius: 6px;
+            animation: glow 2s ease-in-out infinite; }
+  @keyframes glow { 50% { box-shadow: 0 0 10px var(--accent); } }
+  #intake .req { font-weight: 600; margin-bottom: 4px; }
+  #intake .summary { color: var(--dim); margin-bottom: 12px; }
+  .dcard { border: 1px solid var(--border); border-radius: 5px; padding: 10px 14px;
+           margin: 10px 0; background: var(--panel); }
+  .dcard.locked { opacity: .8; }
+  .dcard .q { font-weight: 700; }
+  .dcard .why { color: var(--dim); font-size: 12.5px; margin: 2px 0 6px; }
+  .badge { display: inline-block; font: 11px var(--mono); border-radius: 10px;
+           padding: 1px 8px; margin-left: 8px; border: 1px solid var(--border);
+           background: #fff; color: var(--dim); cursor: help; }
+  .badge.b-request { color: #7b3fb0; border-color: #7b3fb0; }
+  .badge.b-pinned { color: var(--running); border-color: var(--running); }
+  .badge.b-project { color: var(--done); border-color: var(--done); }
+  .badge.b-global { color: var(--accent); border-color: var(--accent); }
+  .badge.b-model { color: var(--dim); }
+  .badge.req-mark { color: var(--failed); border-color: var(--failed); cursor: default; }
+  .dcard .key { font: 11px var(--mono); color: var(--dim); }
+  .opt { display: block; margin: 3px 0; cursor: pointer; }
+  .opt .cons { display: none; color: var(--dim); font-size: 12.5px; margin-left: 22px; }
+  .opt.sel .cons, .opt:hover .cons { display: block; }
+  .dcard input[type=text] { font: inherit; padding: 5px 8px; border: 1px solid var(--border);
+      border-radius: 4px; width: 60%; margin: 3px 0 3px 22px; background: #fff; color: var(--text); }
+  .reasonbox { margin-top: 6px; font-size: 12.5px; color: var(--running); }
+  .reasonbox input[type=text] { margin-left: 0; width: 100%; display: block; }
+  #intake textarea.freetext { width: 100%; box-sizing: border-box; margin-top: 6px; font: inherit; }
+  #intake .actions { margin-top: 14px; display: flex; gap: 10px; align-items: center; }
+  #intake .actions .alt { background: var(--panel); color: var(--accent); border: 1px solid var(--accent); }
+  .ctag { font: 10px var(--mono); border: 1px solid var(--accent); color: var(--accent);
+          border-radius: 3px; padding: 0 5px; margin-right: 6px; }
+  .modname { font: 11px var(--mono); color: var(--dim); margin-left: 8px; }
+  #planbox { padding: 14px 18px 40px; font-family: var(--sans); font-size: 14px;
+             border: 2px solid #7b3fb0; margin: 10px 18px; border-radius: 6px; }
+  #planbox h3 { font-size: 13px; margin: 16px 0 6px; text-transform: uppercase;
+                letter-spacing: .05em; color: var(--dim); }
+  #planbox table { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+  #planbox th, #planbox td { border: 1px solid var(--border); padding: 4px 9px;
+      white-space: normal; vertical-align: top; text-align: left; position: static; }
+  #planbox th { background: var(--panel); text-transform: none; letter-spacing: 0; color: var(--text); }
+  #planbox pre { background: var(--panel); padding: 8px; border-radius: 4px; overflow-x: auto;
+                 font: 12px var(--mono); margin: 4px 0; white-space: pre-wrap; }
+  #planbox .chip { display: inline-block; font: 12px var(--mono); border: 1px solid var(--border);
+                   border-radius: 10px; padding: 1px 9px; margin: 0 6px 4px 0; background: var(--panel); }
+  #planbox textarea { width: 100%; min-height: 56px; font: inherit; padding: 6px 8px;
+                      border: 1px solid var(--border); border-radius: 4px; margin-top: 6px; box-sizing: border-box; }
+  #planbox .actions { margin-top: 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  #planbox .actions .alt { background: var(--panel); color: #7b3fb0; border: 1px solid #7b3fb0; }
+  #stage-msg { padding: 24px 18px; color: var(--dim); }
+  .integ-fail { display: inline-block; vertical-align: top; margin-left: 8px; }
+  .integ-fail pre { max-width: 90vw; overflow: auto; font: 12px var(--mono); }
+  #briefwrap { padding: 4px 18px; font-family: var(--sans); font-size: 14px; }
+  #briefwrap .answers { font: 12px var(--mono); border-collapse: collapse; width: auto; margin: 6px 0; }
+  #briefwrap .answers td { padding: 2px 12px 2px 0; border: 0; white-space: normal; }
+  .ovr { color: var(--running); font-weight: 700; }
+  #prefbtn { margin-left: auto; padding: 3px 12px; font-size: 12px;
+             background: var(--panel); color: var(--accent); border: 1px solid var(--border); }
+  #prefs { position: fixed; top: 0; right: 0; bottom: 0; width: 640px; max-width: 95vw;
+           background: #fff; border-left: 1px solid var(--border); z-index: 10;
+           overflow-y: auto; display: none; padding: 14px 18px; box-shadow: -4px 0 12px rgba(0,0,0,.12);
+           font-size: 12px; }
+  #prefs.open { display: block; }
+  #prefs h2 { font-size: 14px; margin: 0 0 8px; }
+  #prefs .close { float: right; background: none; color: var(--dim); font-size: 16px; padding: 0 6px; }
+  #prefs td, #prefs th { white-space: normal; vertical-align: top; }
+  #prefs .small { padding: 1px 8px; font-size: 11px; font-weight: 400; background: var(--panel);
+                  color: var(--accent); border: 1px solid var(--border); margin-right: 4px; }
+  #prefs a { color: var(--accent); cursor: pointer; text-decoration: underline; }
+  #prefs .obs { background: var(--panel); }
+  footer { padding: 8px 18px; color: var(--dim); font-size: 11px;
+           border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<header>
+  <h1>PIPEZ</h1>
+  <span class="sub">hierarchical task engine — dev console</span>
+  <span class="sub" id="conn">connecting…</span>
+  <button id="prefbtn">Preferences</button>
+</header>
+<div id="prefs"></div>
+<div id="controls">
+  <input id="req" placeholder="Describe the task…" autocomplete="off">
+  <button id="go">Run</button>
+  <select id="runsel"></select>
+</div>
+<div id="ctxwrap">
+  <textarea id="ctx" placeholder="Project context (optional) — site data, requirements, constraints. Binding when provided; leave empty for green-field and pipez proposes an explicit design basis."></textarea>
+  <label id="baselabel"><input type="checkbox" id="baseon"> modify the selected run (its deliverable becomes the baseline for this request)</label>
+</div>
+<div id="runstate"></div>
+<div id="main">
+  <div id="left">
+    <div id="intake" style="display:none"></div>
+    <div id="planbox" style="display:none"></div>
+    <div id="stage-msg" style="display:none"></div>
+    <div id="briefwrap"></div>
+    <div id="waiting" style="display:none"></div>
+    <table id="tasktable">
+      <thead><tr>
+        <th>Task</th><th>Type</th><th>Status</th>
+        <th class="num">Facts</th><th class="num">Tok out</th><th class="num">Elapsed</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <div id="panel"><div id="panel-inner"></div></div>
+</div>
+<footer>click a task to open its detail panel · tree order · live over SSE</footer>
+
+<script>
+"use strict";
+const runs = new Map();
+const tasksByRun = new Map();
+const artifactsByRun = new Map();
+const intakeByRun = new Map();        // run_id -> {status, decisions, answers, brief}
+const planByRun = new Map();          // run_id -> {status, plan, plan_meta, plan_revisions}
+const sandboxByRun = new Map();        // run_id -> sandbox row or null
+const deploymentByRun = new Map();     // run_id -> deployment row or null
+const verificationsByRun = new Map();  // run_id -> [{task_id, verdicts, summary}]
+let currentRun = null;
+let userPinnedRun = false;
+let selectedTask = null;
+let panelKey = null;   // taskId + updated_at of what the panel currently shows
+
+const $ = id => document.getElementById(id);
+
+function taskMap(runId) {
+  if (!tasksByRun.has(runId)) tasksByRun.set(runId, new Map());
+  return tasksByRun.get(runId);
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g,
+    c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+}
+
+function md(text) {
+  if (window.marked && window.DOMPurify) {
+    return DOMPurify.sanitize(marked.parse(String(text ?? "")));
+  }
+  return "<pre>" + esc(text) + "</pre>";
+}
+
+function connect() {
+  const es = new EventSource("/api/events");
+  es.onopen = () => { $("conn").textContent = "live"; };
+  es.onerror = () => { $("conn").textContent = "reconnecting…"; };
+  es.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === "snapshot") {
+      runs.clear(); tasksByRun.clear(); artifactsByRun.clear();
+      for (const r of msg.runs) runs.set(r.id, r);
+      for (const [rid, list] of Object.entries(msg.tasks)) {
+        const m = taskMap(rid);
+        for (const t of list) m.set(t.id, t);
+      }
+      for (const [rid, list] of Object.entries(msg.artifacts || {}))
+        artifactsByRun.set(rid, list);
+      for (const [rid, list] of Object.entries(msg.verifications || {}))
+        verificationsByRun.set(rid, list);
+      sandboxByRun.clear();
+      for (const [rid, sb] of Object.entries(msg.sandbox || {})) sandboxByRun.set(rid, sb);
+      deploymentByRun.clear();
+      for (const [rid, dp] of Object.entries(msg.deployment || {})) deploymentByRun.set(rid, dp);
+      intakeByRun.clear();
+      for (const [rid, iv] of Object.entries(msg.intake || {})) intakeByRun.set(rid, iv);
+      planByRun.clear();
+      for (const [rid, pv] of Object.entries(msg.plan || {})) planByRun.set(rid, pv);
+      if (!currentRun || !runs.has(currentRun)) currentRun = msg.runs[0]?.id || null;
+    } else if (msg.type === "intake") {
+      refreshIntake(msg.run_id);
+    } else if (msg.type === "plan") {
+      refreshPlan(msg.run_id);
+    } else if (msg.type === "sandbox") {
+      sandboxByRun.set(msg.run_id, msg.sandbox);
+    } else if (msg.type === "deployment") {
+      deploymentByRun.set(msg.run_id, msg.deployment);
+    } else if (msg.type === "artifacts") {
+      artifactsByRun.set(msg.run_id, msg.files);
+    } else if (msg.type === "verification") {
+      verificationsByRun.set(msg.run_id, msg.verifications);
+    } else if (msg.type === "run") {
+      const isNew = !runs.has(msg.run.id);
+      runs.set(msg.run.id, msg.run);
+      if (!isNew || msg.run.decisions) mergeRunIntake(msg.run);
+      if (msg.run.plan) planByRun.set(msg.run.id, {
+        status: msg.run.status, plan: msg.run.plan, plan_meta: msg.run.plan_meta,
+        plan_revisions: msg.run.plan_revisions || 0 });
+      if (isNew && !userPinnedRun) currentRun = msg.run.id;
+    } else if (msg.type === "task") {
+      taskMap(msg.task.run_id).set(msg.task.id, msg.task);
+    }
+    render();
+  };
+}
+
+function treeOrder(m) {
+  const kids = new Map();
+  for (const t of m.values()) {
+    const k = t.parent_id || "";
+    if (!kids.has(k)) kids.set(k, []);
+    kids.get(k).push(t);
+  }
+  for (const list of kids.values())
+    list.sort((a, b) => a.created_at - b.created_at || a.seq - b.seq);
+  const out = [];
+  (function walk(pid) {
+    for (const t of kids.get(pid) || []) { out.push(t); walk(t.id); }
+  })("");
+  return out;
+}
+
+function fmtElapsed(t) {
+  if (!t.started_at) return "";
+  const end = t.finished_at || Date.now() / 1000;
+  const s = end - t.started_at;
+  return s < 60 ? s.toFixed(1) + "s" : Math.floor(s / 60) + "m" + Math.floor(s % 60) + "s";
+}
+
+function parseResult(t) {
+  if (!t?.result) return null;
+  try { return JSON.parse(t.result); } catch { return null; }
+}
+
+function render() {
+  const sel = $("runsel");
+  sel.innerHTML = "";
+  const sorted = [...runs.values()].sort((a, b) => b.created_at - a.created_at);
+  for (const r of sorted) {
+    const o = document.createElement("option");
+    o.value = r.id;
+    o.textContent = `[${r.status.replace("_", " ")}] ${r.request.slice(0, 40)}`;
+    if (r.id === currentRun) o.selected = true;
+    sel.appendChild(o);
+  }
+
+  const run = runs.get(currentRun);
+  const state = $("runstate");
+  if (run) {
+    const m = taskMap(run.id);
+    let done = 0, failed = 0, running = 0;
+    for (const t of m.values()) {
+      if (t.status === "done") done++;
+      else if (t.status === "failed") failed++;
+      else if (t.status !== "pending" && t.status !== "cancelled") running++;
+    }
+    const arts = artifactsByRun.get(run.id) || [];
+    state.innerHTML =
+      `run <b>${run.id}</b> — ${esc(run.status)} · ${m.size} tasks · ` +
+      `${done} done · ${running} active · ` +
+      (failed ? `<span class="err">${failed} failed</span>` : `0 failed`) +
+      (run.error ? ` · <span class="err">${esc(run.error)}</span>` : "") +
+      (arts.length ? ` · files:` + arts.map(a =>
+        `<span class="art"><a href="/artifacts/${esc(run.id)}/${encodeURIComponent(a.filename)}" ` +
+        `download>${esc(a.filename)}</a></span>`).join("") : "") +
+      stopButton(run) + sandboxBadge(run) + deployBadge(run) + verifySummary(run) + integrationFailure(run);
+  } else {
+    state.textContent = "no runs yet — submit a task above";
+  }
+
+  renderStage(run);
+  const tbody = $("rows");
+  tbody.innerHTML = "";
+  if (run && !stageHidesTable(run)) {
+    for (const t of treeOrder(taskMap(run.id))) {
+      const r = parseResult(t);
+      const tr = document.createElement("tr");
+      tr.className = "task" + (t.id === selectedTask ? " selected" : "");
+      tr.innerHTML =
+        `<td class="title" style="padding-left:${10 + t.depth * 22}px">` +
+          `<span class="role">${esc(t.role)}</span>` +
+          (t.kind === "code" ? `<span class="ctag">code</span>` : "") +
+          `${esc(t.title)}` +
+          (t.module ? `<span class="modname">${esc(t.module)}</span>` : "") +
+          codeStats(t, r) + `</td>` +
+        `<td>${esc(t.action || "")}</td>` +
+        `<td class="status s-${esc(t.status)}">${esc(t.status.replace("_", " "))}</td>` +
+        `<td class="num">${r?.facts?.length ?? ""}</td>` +
+        `<td class="num">${t.output_tokens || ""}</td>` +
+        `<td class="num">${fmtElapsed(t)}</td>`;
+      tr.onclick = () => { selectedTask = (selectedTask === t.id) ? null : t.id; render(); };
+      tbody.appendChild(tr);
+    }
+  }
+  renderPanel();
+}
+
+function codeStats(t, r) {
+  if (t.kind !== "code") return "";
+  const meta = r?.metadata || {};
+  const parts = [];
+  const cost = t.cost_usd ?? meta.cost_usd;
+  if (cost) parts.push(`$${Number(cost).toFixed(2)}`);
+  if (meta.tests) parts.push(`tests ${meta.tests.passed ?? 0} passed / ${meta.tests.failed ?? 0} failed`);
+  if (meta.files_changed) parts.push(`${meta.files_changed.length} files`);
+  if (!parts.length) return "";
+  return `<span class="modname" title="commit ${esc(meta.commit || "—")}">${esc(parts.join(" · "))}</span>`;
+}
+
+function integrationFailure(run) {
+  if (run.status !== "failed" || !run.plan || !/^integration failed/.test(run.error || "")) return "";
+  const [head, ...tail] = run.error.split("\n");
+  return `<details class="integ-fail"><summary class="err">${esc(head)}</summary>` +
+    `<pre>${esc(tail.join("\n") || run.error)}</pre></details>`;
+}
+
+function runIt(run) {
+  if (run.status !== "done" || !run.plan || !run.result) return "";
+  let res = run.result;
+  if (typeof res === "string") { try { res = JSON.parse(res); } catch { return ""; } }
+  if (!res?.output) return "";
+  return `<details open><summary>Run it</summary><div class="md">${md(res.output)}</div></details>`;
+}
+
+function verifySummary(run) {
+  const vs = verificationsByRun.get(run.id) || [];
+  if (vs.length) {
+    let c = 0, u = 0, w = 0;
+    for (const v of vs) {
+      let verdicts = [];
+      try { verdicts = JSON.parse(v.verdicts); } catch {}
+      for (const d of verdicts) {
+        if (d.verdict === "confirmed") c++;
+        else if (d.verdict === "wrong") w++;
+        else u++;
+      }
+    }
+    return ` · verified: <span class="s-done">${c} ✓</span> / ` +
+           `<span class="s-running">${u} ?</span> / ` +
+           `<span class="s-failed">${w} ✗</span>` +
+           (run.status === "done"
+             ? ` <button class="verify-btn" onclick="verifyRun()">re-verify</button>` : "");
+  }
+  if (run.status === "done" && run.result) {
+    const hasGaps = [...(tasksByRun.get(run.id) || new Map()).values()]
+      .some(t => t.status === "failed");
+    return ` · <button class="verify-btn" onclick="verifyRun()">verify</button>` +
+      (hasGaps ? ` <button class="verify-btn" onclick="resumeRun()">heal gaps</button>` : "");
+  }
+  if (run.status === "verifying") return " · verifying…";
+  if (run.status === "failed" || run.status === "cancelled")
+    return ` · <button class="verify-btn" onclick="resumeRun()">resume</button>`;
+  return "";
+}
+
+function stopButton(run) {
+  if (["done", "failed", "cancelled", "verifying"].includes(run.status)) return "";
+  return ` · <button class="verify-btn stop-btn" onclick="stopRun()">Stop</button>`;
+}
+
+async function stopRun() {
+  if (!currentRun) return;
+  if (!confirm("Stop this run? The sandbox is kept; you can resume it later.")) return;
+  try {
+    const res = await fetch(`/api/runs/${currentRun}/stop`, { method: "POST" });
+    if (!res.ok) throw new Error(await res.text());
+  } catch (err) {
+    $("runstate").innerHTML = `<span class="err">stop failed: ${esc(err.message)}</span>`;
+  }
+}
+
+function sandboxBadge(run) {
+  const sb = sandboxByRun.get(run.id);
+  if (!sb) return "";
+  return ` · <span class="art">sandbox ${esc(sb.vmid ?? sb.kind)} · ${esc(sb.ip ?? "-")} · ${esc(sb.status)}</span>` +
+    (sb.status === "kept"
+      ? ` <button class="verify-btn" onclick="destroySandbox()">destroy</button>` : "");
+}
+
+function deployBadge(run) {
+  const dp = deploymentByRun.get(run.id);
+  const canDeploy = run.status === "done" && (artifactsByRun.get(run.id) || []).some(
+    a => a.filename.endsWith(".tar.gz")) && run.plan?.deploy?.target === "vm";
+  const deployBtn = ` <button class="verify-btn" onclick="deployRun()">Deploy</button>`;
+  if (!dp) return canDeploy ? " ·" + deployBtn : "";
+  const undeployBtn = ` <button class="verify-btn" onclick="undeployRun()">Undeploy</button>`;
+  if (dp.status === "ready")
+    return ` · Deployed: <a class="art" href="${esc(dp.url)}" target="_blank" rel="noopener">${esc(dp.url)}</a>` +
+      undeployBtn;
+  if (dp.status === "failed") {
+    const tail = String(dp.error || "").slice(-300);
+    return ` · <span class="err" title="${esc(dp.error || "")}">deploy failed: ${esc(tail)}</span>` +
+      undeployBtn + (canDeploy ? deployBtn : "");
+  }
+  if (dp.status === "destroyed")
+    return ` · <span class="art">deployment destroyed</span>` + (canDeploy ? deployBtn : "");
+  return ` · <span class="art">deploy ${esc(dp.status)}…</span>`;
+}
+
+async function deployAction(what) {
+  if (!currentRun) return;
+  try {
+    const res = await fetch(`/api/runs/${currentRun}/${what}`, { method: "POST" });
+    if (!res.ok) throw new Error(await res.text());
+  } catch (err) {
+    alert(what + " failed: " + err.message);
+  }
+}
+const deployRun = () => deployAction("deploy");
+const undeployRun = () => {
+  if (confirm("Destroy the deployed VM?")) deployAction("undeploy");
+};
+
+async function destroySandbox() {
+  if (!currentRun) return;
+  try {
+    const res = await fetch(`/api/sandboxes/${currentRun}/destroy`, { method: "POST" });
+    if (!res.ok) throw new Error(await res.text());
+  } catch (err) {
+    alert("destroy failed: " + err.message);
+  }
+}
+
+async function resumeRun() {
+  if (!currentRun) return;
+  try {
+    const res = await fetch(`/api/runs/${currentRun}/resume`, { method: "POST" });
+    if (!res.ok) throw new Error(await res.text());
+  } catch (err) {
+    $("runstate").innerHTML = `<span class="err">resume failed: ${esc(err.message)}</span>`;
+  }
+}
+
+async function verifyRun() {
+  if (!currentRun) return;
+  try {
+    const res = await fetch(`/api/runs/${currentRun}/verify`, { method: "POST" });
+    if (!res.ok) throw new Error(await res.text());
+  } catch (err) {
+    $("runstate").innerHTML = `<span class="err">verify failed: ${esc(err.message)}</span>`;
+  }
+}
+
+function renderPanel() {
+  const panel = $("panel");
+  const task = selectedTask && currentRun ? taskMap(currentRun).get(selectedTask) : null;
+  if (!task) {
+    panel.classList.remove("open");
+    panelKey = null;
+    return;
+  }
+  panel.classList.add("open");
+  const key = task.id + ":" + task.updated_at;
+  if (key === panelKey) return;   // avoid resetting scroll/collapse every tick
+  panelKey = key;
+
+  const r = parseResult(task);
+  let html = `
+    <div id="panel-head">
+      <button class="close" onclick="selectedTask=null;render()" title="close">✕</button>
+      <span class="role-chip">${esc(task.role)}</span>
+      <span class="status s-${esc(task.status)}">${esc(task.status.replace("_", " "))}</span>
+      <h2>${esc(task.title)}</h2>
+      <div class="meta">depth ${task.depth} · ${esc(task.action || "—")} · ${esc(task.model || "")}
+        · tok ${task.input_tokens}/${task.output_tokens} · ${fmtElapsed(task)}</div>
+    </div>`;
+
+  if (task.error)
+    html += `<div class="section-label err">error</div><div class="err">${esc(task.error)}</div>`;
+
+  if (r?.summary)
+    html += `<div class="section-label">summary</div><div class="md">${md(r.summary)}</div>`;
+
+  if (r?.output)
+    html += `<div class="section-label">output</div><div class="md">${md(r.output)}</div>`;
+
+  if (r?.facts?.length) {
+    html += `<div class="section-label">facts (${r.facts.length})</div>
+      <table id="facts-table"><thead><tr><th>Claim</th><th>Value</th><th>Source</th></tr></thead><tbody>`;
+    for (const f of r.facts) {
+      const src = /^https?:\/\//.test(f.source)
+        ? `<a href="${esc(f.source)}" target="_blank" rel="noopener">${esc(f.source)}</a>`
+        : esc(f.source);
+      html += `<tr><td>${esc(f.claim)}</td><td>${esc(f.value)}</td><td>${src}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  const vrows = (verificationsByRun.get(currentRun) || [])
+    .filter(v => v.task_id === task.id);
+  for (const v of vrows) {
+    let verdicts = [];
+    try { verdicts = JSON.parse(v.verdicts); } catch {}
+    html += `<div class="section-label">verification</div>`;
+    if (v.summary) html += `<div class="md">${md(v.summary)}</div>`;
+    if (verdicts.length) {
+      html += `<table id="facts-table"><thead><tr><th>Claim</th><th>Verdict</th><th>Note</th></tr></thead><tbody>`;
+      for (const d of verdicts) {
+        const cls = d.verdict === "confirmed" ? "s-done"
+                  : d.verdict === "wrong" ? "s-failed" : "s-running";
+        let note = esc(d.note);
+        if (d.correction) note += `<br><b>correction:</b> ${esc(d.correction)}`;
+        html += `<tr><td>${esc(d.claim)}</td><td class="${cls}">${esc(d.verdict)}</td><td>${note}</td></tr>`;
+      }
+      html += `</tbody></table>`;
+    }
+  }
+
+  html += `<details><summary>task prompt</summary><pre>${esc(task.prompt)}</pre></details>`;
+  if (task.context)
+    html += `<details><summary>shared context received</summary><pre>${esc(task.context)}</pre></details>`;
+
+  $("panel-inner").innerHTML = html;
+}
+
+// ---- intake / brief -------------------------------------------------------
+const drafts = new Map();     // run_id -> {key: {sel, custom, reason}}
+const inflight = new Set();   // run_ids with a POST in flight
+const intakeErr = new Map();  // run_id -> error text
+let intakeKey = null, briefKey = null;
+
+function mergeRunIntake(run) {
+  const cur = intakeByRun.get(run.id) || {};
+  intakeByRun.set(run.id, {
+    status: run.status,
+    decisions: run.decisions ?? cur.decisions ?? null,
+    answers: run.answers ?? cur.answers ?? null,
+    brief: run.brief ?? cur.brief ?? null,
+  });
+}
+
+async function refreshIntake(runId) {
+  try {
+    const res = await fetch(`/api/runs/${runId}/intake`);
+    if (!res.ok) return;
+    intakeByRun.set(runId, await res.json());
+    render();
+  } catch {}
+}
+
+function intakeOf(run) {
+  const iv = intakeByRun.get(run.id) || {};
+  return {
+    decisions: iv.decisions ?? run.decisions ?? null,
+    answers: iv.answers ?? run.answers ?? null,
+    brief: iv.brief ?? run.brief ?? null,
+  };
+}
+
+function stageHidesTable(run) {
+  // awaiting_human with a task tree = a task question, not the intake
+  if (run.status === "awaiting_human") return taskMap(run.id).size === 0;
+  if (run.status === "awaiting_plan") return true;
+  return (run.status === "intake" || run.status === "briefing" ||
+          run.status === "planning") &&
+         taskMap(run.id).size === 0;
+}
+
+function draftFor(runId, d) {
+  if (!drafts.has(runId)) drafts.set(runId, {});
+  const all = drafts.get(runId);
+  if (!all[d.key]) {
+    const pv = d.prefill?.value;
+    const vals = (d.options || []).map(o => o.value);
+    let sel = null, custom = "";
+    if (pv != null) {
+      if (vals.includes(pv)) sel = pv; else { sel = "__custom__"; custom = pv; }
+    }
+    all[d.key] = { sel, custom, reason: "" };
+  }
+  return all[d.key];
+}
+
+function answerOf(st) {
+  return st.sel === "__custom__" ? st.custom.trim() : (st.sel ?? "");
+}
+
+function needsReason(d, st) {
+  const pf = d.prefill || {};
+  if (d.locked || pf.value == null || pf.source === "model" || pf.source === "none") return false;
+  const a = answerOf(st);
+  return a !== "" && a !== pf.value;
+}
+
+function badge(d) {
+  const pf = d.prefill || {};
+  const src = pf.source || "none";
+  if (src === "none") return "";
+  const ev = pf.evidence || {};
+  let label = src === "global" ? `global (n=${ev.count ?? 0})` : src;
+  const tip = [];
+  tip.push(`source: ${src}` + (ev.count != null ? ` · observations: ${ev.count}` : ""));
+  if (ev.projects?.length) tip.push("projects: " + ev.projects.join(", "));
+  for (const x of ev.exceptions || [])
+    tip.push(`exception: ${x.value} — ${x.reason}`);
+  return `<span class="badge b-${esc(src)}" title="${esc(tip.join("\n"))}">${esc(label)}</span>`;
+}
+
+function renderIntake(run, iv) {
+  const box = $("intake");
+  const key = run.id + ":" + run.status + ":" + JSON.stringify(iv.decisions || []).length;
+  if (key === intakeKey) { syncIntakeButtons(run); return; }
+  intakeKey = key;
+  const decisions = iv.decisions || [];
+  const summary = run.intake_meta?.summary ?? run.intake_meta?.discovery?.summary ?? "";
+  let html = `<div class="req">${esc((run.request || "").slice(0, 200))}</div>` +
+             `<div class="summary">${esc(summary)}</div>`;
+  if (!decisions.length) html += `<div class="summary">Loading decisions…</div>`;
+  for (const d of decisions) {
+    const st = draftFor(run.id, d);
+    const prevAns = iv.answers || run.answers || {};
+    const dis = (d.locked || d.key in prevAns) ? " disabled" : "";
+    html += `<div class="dcard${d.locked ? " locked" : ""}" data-key="${esc(d.key)}">` +
+      `<div><span class="q">${esc(d.question)}</span>${badge(d)}` +
+      (d.required ? `<span class="badge req-mark">required</span>` : "") +
+      (d.locked ? `<span class="badge b-request" title="Fixed by your request">stated in request</span>` : "") +
+      `</div><div class="key">${esc(d.key)}</div>` +
+      `<div class="why">${esc(d.why_it_matters || "")}</div>`;
+    const name = "r_" + d.key;
+    if (d.free_text) {
+      html += `<textarea class="freetext" rows="3" placeholder="your answer"${dis}>${esc(st.custom)}</textarea></div>`;
+      continue;
+    }
+    for (const o of d.options || []) {
+      html += `<label class="opt${st.sel === o.value ? " sel" : ""}">` +
+        `<input type="radio" name="${esc(name)}" value="${esc(o.value)}"${dis}` +
+        `${st.sel === o.value ? " checked" : ""}> ${esc(o.label || o.value)}` +
+        `<div class="cons">${esc(o.consequences || "")}</div></label>`;
+    }
+    html += `<label class="opt${st.sel === "__custom__" ? " sel" : ""}">` +
+      `<input type="radio" name="${esc(name)}" value="__custom__"${dis}` +
+      `${st.sel === "__custom__" ? " checked" : ""}> custom…</label>` +
+      `<input type="text" class="custom" placeholder="custom value" value="${esc(st.custom)}"${dis}` +
+      ` style="${st.sel === "__custom__" ? "" : "display:none"}">` +
+      `<div class="reasonbox" style="${needsReason(d, st) ? "" : "display:none"}">` +
+      `Why different this time? (leave blank if this is your new default)` +
+      `<input type="text" class="reason" value="${esc(st.reason)}"></div></div>`;
+  }
+  html += `<div class="actions"><button id="acceptall" class="alt">Accept all defaults</button>` +
+          `<button id="submitans">Submit answers</button>` +
+          `<span id="intakeerr" class="err"></span></div>`;
+  box.innerHTML = html;
+
+  box.querySelectorAll(".dcard").forEach(card => {
+    const d = decisions.find(x => x.key === card.dataset.key);
+    const st = draftFor(run.id, d);
+    if (d.free_text) {
+      st.sel = "__custom__";
+      card.querySelector(".freetext").oninput = e => { st.custom = e.target.value; };
+      return;
+    }
+    const sync = () => {
+      card.querySelectorAll(".opt").forEach(l =>
+        l.classList.toggle("sel", l.querySelector("input").checked));
+      card.querySelector(".custom").style.display = st.sel === "__custom__" ? "" : "none";
+      card.querySelector(".reasonbox").style.display = needsReason(d, st) ? "" : "none";
+    };
+    card.querySelectorAll("input[type=radio]").forEach(r =>
+      r.onchange = () => { st.sel = r.value; sync(); });
+    card.querySelector(".custom").oninput = e => { st.custom = e.target.value; sync(); };
+    card.querySelector(".reason").oninput = e => { st.reason = e.target.value; };
+  });
+  $("acceptall").onclick = () => postIntake(run.id, { accept_all: true });
+  $("submitans").onclick = () => {
+    const answers = {}, reasons = {};
+    const answered = iv.answers || run.answers || null;
+    for (const d of decisions) {
+      if (d.locked || (answered && d.key in answered)) continue;
+      const st = draftFor(run.id, d);
+      const a = answerOf(st);
+      if (a === "") continue;
+      answers[d.key] = a;
+      if (needsReason(d, st) && st.reason.trim()) reasons[d.key] = st.reason.trim();
+    }
+    postIntake(run.id, { answers, reasons });
+  };
+  syncIntakeButtons(run);
+}
+
+function syncIntakeButtons(run) {
+  const busy = inflight.has(run.id);
+  for (const id of ["acceptall", "submitans"]) if ($(id)) $(id).disabled = busy;
+  if ($("intakeerr")) $("intakeerr").textContent = intakeErr.get(run.id) || "";
+}
+
+async function postIntake(runId, body) {
+  inflight.add(runId); intakeErr.delete(runId);
+  render();
+  try {
+    const res = await fetch(`/api/runs/${runId}/intake`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      let detail = await res.text();
+      try { detail = JSON.parse(detail).detail ?? detail; } catch {}
+      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    }
+    const iv = await res.json();
+    intakeByRun.set(runId, iv);
+    const r = runs.get(runId);
+    if (r) r.status = iv.status;
+  } catch (err) {
+    intakeErr.set(runId, err.message);
+  } finally {
+    inflight.delete(runId);
+    render();
+  }
+}
+
+// ---- mid-run task questions ("Waiting on you") ------------------------------
+const taskDrafts = new Map();   // task_id -> {sel, custom, reason}
+const taskBusy = new Set();
+const taskErr = new Map();
+let waitingKey = null;
+
+function taskDraft(t) {
+  if (!taskDrafts.has(t.id)) {
+    const q = t.question || {};
+    const vals = (q.options || []).map(o => o.value);
+    const pd = q.proposed_default;
+    taskDrafts.set(t.id, vals.includes(pd) ? { sel: pd, custom: "", reason: "" }
+      : { sel: pd ? "__custom__" : null, custom: pd || "", reason: "" });
+  }
+  return taskDrafts.get(t.id);
+}
+
+function renderWaiting(run) {
+  const box = $("waiting");
+  const ws = run ? [...taskMap(run.id).values()]
+    .filter(t => t.status === "awaiting_human" && t.question) : [];
+  if (!ws.length) { box.style.display = "none"; waitingKey = null; return; }
+  box.style.display = "";
+  const key = run.id + "|" + ws.map(t => t.id + ":" + t.question.key + ":" + t.question.question).join("|");
+  if (key !== waitingKey) {
+    waitingKey = key;
+    let html = `<h3>Waiting on you</h3>`;
+    for (const t of ws) {
+      const q = t.question, st = taskDraft(t), name = "tq_" + t.id;
+      html += `<div class="dcard" data-task="${esc(t.id)}">` +
+        `<div class="tname">task: ${esc(t.title)}</div>` +
+        `<div><span class="q">${esc(q.question)}</span></div>` +
+        `<div class="key">${esc(q.key)}</div>` +
+        `<div class="why">${esc(q.why_it_matters || "")}</div>`;
+      for (const o of q.options || []) {
+        html += `<label class="opt${st.sel === o.value ? " sel" : ""}">` +
+          `<input type="radio" name="${esc(name)}" value="${esc(o.value)}"` +
+          `${st.sel === o.value ? " checked" : ""}> ${esc(o.label || o.value)}` +
+          `<div class="cons">${esc(o.consequences || "")}</div></label>`;
+      }
+      html += `<label class="opt${st.sel === "__custom__" ? " sel" : ""}">` +
+        `<input type="radio" name="${esc(name)}" value="__custom__"` +
+        `${st.sel === "__custom__" ? " checked" : ""}> custom…</label>` +
+        `<input type="text" class="custom" placeholder="custom value" value="${esc(st.custom)}"` +
+        ` style="${st.sel === "__custom__" ? "" : "display:none"}">` +
+        `<div class="reasonbox">Reason (optional)` +
+        `<input type="text" class="reason" value="${esc(st.reason)}"></div>` +
+        `<div class="actions"><button class="tq-answer">Answer</button>` +
+        `<span class="err tq-err"></span></div></div>`;
+    }
+    box.innerHTML = html;
+    box.querySelectorAll(".dcard").forEach(card => {
+      const t = ws.find(x => x.id === card.dataset.task), st = taskDraft(t);
+      const sync = () => {
+        card.querySelectorAll(".opt").forEach(l =>
+          l.classList.toggle("sel", l.querySelector("input").checked));
+        card.querySelector(".custom").style.display = st.sel === "__custom__" ? "" : "none";
+      };
+      card.querySelectorAll("input[type=radio]").forEach(r =>
+        r.onchange = () => { st.sel = r.value; sync(); });
+      card.querySelector(".custom").oninput = e => { st.custom = e.target.value; };
+      card.querySelector(".reason").oninput = e => { st.reason = e.target.value; };
+      card.querySelector(".tq-answer").onclick = () => postTaskAnswer(run.id, t);
+    });
+  }
+  box.querySelectorAll(".dcard").forEach(card => {
+    const id = card.dataset.task;
+    card.querySelector(".tq-answer").disabled = taskBusy.has(id);
+    card.querySelector(".tq-err").textContent = taskErr.get(id) || "";
+  });
+}
+
+async function postTaskAnswer(runId, t) {
+  const st = taskDraft(t);
+  const value = st.sel === "__custom__" ? st.custom.trim() : (st.sel ?? "");
+  if (!value) { taskErr.set(t.id, "pick or type an answer"); render(); return; }
+  taskBusy.add(t.id); taskErr.delete(t.id); render();
+  try {
+    const res = await fetch(`/api/runs/${runId}/tasks/${t.id}/answer`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value, reason: st.reason.trim() || null }),
+    });
+    if (!res.ok) {
+      let detail = await res.text();
+      try { detail = JSON.parse(detail).detail ?? detail; } catch {}
+      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    }
+    taskDrafts.delete(t.id);
+  } catch (err) {
+    taskErr.set(t.id, err.message);
+  } finally {
+    taskBusy.delete(t.id); waitingKey = null; render();
+  }
+}
+
+function renderStage(run) {
+  const box = $("intake"), msg = $("stage-msg"), bw = $("briefwrap"), pb = $("planbox");
+  $("tasktable").style.display = (run && stageHidesTable(run)) ? "none" : "";
+  if (!run) { box.style.display = msg.style.display = pb.style.display = "none"; bw.innerHTML = ""; briefKey = null; planKey = null; renderWaiting(null); return; }
+  if (run.status === "awaiting_plan") {
+    pb.style.display = "";
+    renderPlan(run);
+  } else { pb.style.display = "none"; planKey = null; }
+  const iv = intakeOf(run);
+  renderWaiting(run);
+  if (run.status === "awaiting_human" && taskMap(run.id).size === 0) {
+    box.style.display = ""; msg.style.display = "none";
+    renderIntake(run, iv);
+  } else {
+    box.style.display = "none"; intakeKey = null;
+    if (stageHidesTable(run)) {
+      msg.style.display = "";
+      msg.textContent = run.status === "briefing" ? "briefing…"
+        : run.status === "planning"
+          ? "planning… (architecture, contracts, task graph)" +
+            (run.plan_revisions ? ` — revision ${run.plan_revisions}` : "")
+        : "intake: discovering decisions…";
+    } else msg.style.display = "none";
+  }
+  // brief view
+  const runit = runIt(run);
+  const key = run.id + ":" + (iv.brief || "").length + ":" + runit.length;
+  if (key === briefKey) return;
+  briefKey = key;
+  if (!iv.brief) { bw.innerHTML = runit; return; }
+  let html = `<details open><summary>Build brief</summary><div class="md">${md(iv.brief)}</div>`;
+  const answers = iv.answers || {};
+  const byKey = new Map((iv.decisions || []).map(d => [d.key, d]));
+  const keys = Object.keys(answers);
+  if (keys.length) {
+    html += `<table class="answers"><tbody>`;
+    for (const k of keys) {
+      const pf = byKey.get(k)?.prefill;
+      let src = pf?.source ?? "—";
+      if (pf && pf.value != null && pf.source !== "model" && pf.source !== "none" &&
+          pf.value !== answers[k]) src = "overridden";
+      html += `<tr><td>${esc(k)}</td><td>${esc(answers[k])}</td>` +
+              `<td class="${src === "overridden" ? "ovr" : "num"}">${esc(src)}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+  bw.innerHTML = html + `</details>` + runit;
+}
+
+// ---- plan -----------------------------------------------------------------
+const planNotes = new Map();   // run_id -> unsent note text
+const planErr = new Map();     // run_id -> error text
+const planBusy = new Set();
+let planKey = null;
+
+async function refreshPlan(runId) {
+  try {
+    const res = await fetch(`/api/runs/${runId}/plan`);
+    if (!res.ok) return;
+    planByRun.set(runId, await res.json());
+    render();
+  } catch {}
+}
+
+function planMetaLines(m) {
+  if (!m) return "";
+  let h = "";
+  for (const w of m.warnings || []) h += `<div class="err">Warning: ${esc(w)}</div>`;
+  if (m.model || m.output_tokens != null)
+    h += `<div class="summary">${esc([m.model, (m.output_tokens ?? 0) + " output tokens",
+      (m.seconds ?? 0) + " s"].filter(Boolean).join(" · "))}</div>`;
+  return h;
+}
+
+function renderPlan(run) {
+  const pv = planByRun.get(run.id) || {};
+  const plan = pv.plan || run.plan;
+  const box = $("planbox");
+  const key = run.id + ":" + run.status + ":" + (pv.plan_revisions ?? run.plan_revisions ?? 0) +
+              ":" + JSON.stringify(plan || {}).length;
+  if (key === planKey) { syncPlanButtons(run); return; }
+  planKey = key;
+  if (!plan) { box.innerHTML = `<div class="summary">Loading plan…</div>`; return; }
+  const rev = pv.plan_revisions ?? run.plan_revisions ?? 0;
+  let html = `<div class="req">Plan for review${rev ? ` (revision ${rev})` : ""}</div>` +
+    planMetaLines(pv.plan_meta || run.plan_meta) +
+    `<h3>Architecture</h3><div class="md">${md(plan.architecture)}</div>` +
+    `<h3>Stack</h3><div>${(plan.stack || []).map(x => `<span class="chip">${esc(x)}</span>`).join("")}</div>` +
+    `<h3>Repo layout</h3><pre>${esc(plan.repo_layout)}</pre>` +
+    `<h3>Modules</h3><table><thead><tr><th>Name</th><th>Path</th><th>Purpose</th>` +
+    `<th>Depends on</th><th>Contract</th></tr></thead><tbody>`;
+  for (const m of plan.modules || [])
+    html += `<tr><td>${esc(m.name)}</td><td>${esc(m.path)}</td><td>${esc(m.purpose)}</td>` +
+      `<td>${esc((m.depends_on || []).join(", "))}</td>` +
+      `<td><details><summary>contract</summary><pre>${esc(m.contract)}</pre></details></td></tr>`;
+  html += `</tbody></table><h3>Tasks (${(plan.tasks || []).length})</h3>` +
+    `<table><thead><tr><th>Id</th><th>Title</th><th>Module</th><th>Tier</th><th>Effort</th>` +
+    `<th>Depends on</th><th>Acceptance</th></tr></thead><tbody>`;
+  for (const t of plan.tasks || [])
+    html += `<tr><td>${esc(t.id)}</td><td>${esc(t.title)}</td><td>${esc(t.module)}</td>` +
+      `<td>${esc(t.tier)}</td><td>${esc(t.effort || "")}</td>` +
+      `<td>${esc((t.depends_on || []).join(", "))}</td>` +
+      `<td><details><summary>${(t.acceptance || []).length}</summary><ul>` +
+      (t.acceptance || []).map(a => `<li>${esc(a)}</li>`).join("") + `</ul></details></td></tr>`;
+  const dpl = plan.deploy || { target: "none" };
+  html += `</tbody></table><h3>Deploy</h3><div class="summary">` + (dpl.target === "vm"
+    ? `target vm · port ${esc(dpl.port)} · health ${esc(dpl.health_path)} · ` +
+      `${(dpl.install_commands || []).length} install command(s)`
+    : `target none`) + `</div>` +
+    `<h3>Scaffold commands</h3><pre>${esc((plan.scaffold_commands || []).join("\n"))}</pre>` +
+    `<h3>Review</h3><textarea id="plannote" placeholder="Note for the architect (required to request changes)">` +
+    `${esc(planNotes.get(run.id) || "")}</textarea>` +
+    `<div class="actions"><button id="planapprove">Approve plan</button>` +
+    `<button id="planchanges" class="alt">Request changes</button>` +
+    `<span id="planerr" class="err"></span></div>`;
+  box.innerHTML = html;
+  $("plannote").oninput = e => planNotes.set(run.id, e.target.value);
+  $("planapprove").onclick = () => postPlan(run.id, { approve: true });
+  $("planchanges").onclick = () => {
+    const note = ($("plannote").value || "").trim();
+    if (!note) { planErr.set(run.id, "a note is required to request changes"); syncPlanButtons(run); return; }
+    postPlan(run.id, { approve: false, note });
+  };
+  syncPlanButtons(run);
+}
+
+function syncPlanButtons(run) {
+  const busy = planBusy.has(run.id);
+  for (const id of ["planapprove", "planchanges"]) if ($(id)) $(id).disabled = busy;
+  if ($("planerr")) $("planerr").textContent = planErr.get(run.id) || "";
+}
+
+async function postPlan(runId, body) {
+  planBusy.add(runId); planErr.delete(runId);
+  render();
+  try {
+    const res = await fetch(`/api/runs/${runId}/plan`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      let detail = await res.text();
+      try { detail = JSON.parse(detail).detail ?? detail; } catch {}
+      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    }
+    const pv = await res.json();
+    planByRun.set(runId, pv);
+    if (!body.approve) planNotes.delete(runId);
+    const r = runs.get(runId);
+    if (r) { r.status = pv.status; r.plan_revisions = pv.plan_revisions; }
+    planKey = null;
+  } catch (err) {
+    planErr.set(runId, err.message);
+  } finally {
+    planBusy.delete(runId);
+    render();
+  }
+}
+
+// ---- preferences panel ----------------------------------------------------
+async function loadPrefs() {
+  const box = $("prefs");
+  try {
+    const res = await fetch("/api/preferences");
+    if (!res.ok) throw new Error(await res.text());
+    const prefs = await res.json();
+    let html = `<button class="close" onclick="togglePrefs()">✕</button><h2>Preferences</h2>` +
+      `<table><thead><tr><th>Key</th><th>Value</th><th>Source</th><th class="num">Evidence</th>` +
+      `<th>Last seen</th><th></th></tr></thead><tbody>`;
+    const keys = Object.keys(prefs);
+    if (!keys.length) html += `<tr><td colspan="6">no preferences yet</td></tr>`;
+    for (const k of keys) {
+      const p = prefs[k], ev = p.evidence || {};
+      const ek = encodeURIComponent(k);
+      html += `<tr><td>${esc(k)}</td><td>${esc(p.value ?? "—")}</td><td>${esc(p.source)}</td>` +
+        `<td class="num">${ev.count ?? 0}</td>` +
+        `<td>${ev.last_seen ? new Date(ev.last_seen * 1000).toLocaleString() : ""}</td>` +
+        `<td><button class="small" data-act="pin" data-k="${esc(k)}">pin</button>` +
+        `<button class="small" data-act="retire" data-k="${esc(k)}">retire</button>` +
+        `<a data-act="obs" data-k="${esc(k)}">observations</a></td></tr>` +
+        `<tr class="obs" id="obs-${ek}" style="display:none"><td colspan="6"></td></tr>`;
+    }
+    box.innerHTML = html + `</tbody></table>`;
+    box.querySelectorAll("[data-act]").forEach(el => el.onclick = () => prefAction(el.dataset.act, el.dataset.k));
+  } catch (err) {
+    box.innerHTML = `<button class="close" onclick="togglePrefs()">✕</button>` +
+      `<div class="err">failed to load preferences: ${esc(err.message)}</div>`;
+  }
+}
+
+async function prefAction(act, key) {
+  try {
+    if (act === "pin") {
+      const v = prompt(`Pin value for ${key}:`);
+      if (v === null || v === "") return;
+      const res = await fetch(`/api/preferences/${encodeURIComponent(key)}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value: v }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      await loadPrefs();
+    } else if (act === "retire") {
+      if (!confirm(`Retire preference ${key}?`)) return;
+      const res = await fetch(`/api/preferences/${encodeURIComponent(key)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(await res.text());
+      await loadPrefs();
+    } else if (act === "obs") {
+      const row = $("obs-" + encodeURIComponent(key));
+      if (row.style.display === "") { row.style.display = "none"; return; }
+      const res = await fetch(`/api/observations?key=${encodeURIComponent(key)}`);
+      if (!res.ok) throw new Error(await res.text());
+      const obs = await res.json();
+      let h = `<table><thead><tr><th>Value</th><th>Scope</th><th>Source</th><th>Reason</th><th>Run</th><th>Time</th></tr></thead><tbody>`;
+      for (const o of obs)
+        h += `<tr><td>${esc(o.value)}</td><td>${esc(o.scope)}</td><td>${esc(o.source)}</td>` +
+             `<td>${esc(o.reason || "")}</td><td>${esc(o.run_id || "")}</td>` +
+             `<td>${new Date(o.ts * 1000).toLocaleString()}</td></tr>`;
+      row.firstChild.innerHTML = h + `</tbody></table>`;
+      row.style.display = "";
+    }
+  } catch (err) {
+    alert(`${act} failed: ${err.message}`);
+  }
+}
+
+function togglePrefs() {
+  const box = $("prefs");
+  box.classList.toggle("open");
+  if (box.classList.contains("open")) loadPrefs();
+}
+$("prefbtn").onclick = togglePrefs;
+
+$("runsel").onchange = e => {
+  currentRun = e.target.value; userPinnedRun = true; selectedTask = null; render();
+};
+
+async function submit() {
+  const text = $("req").value.trim();
+  if (!text) return;
+  $("go").disabled = true;
+  try {
+    const res = await fetch("/api/requests", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: text,
+        context: $("ctx").value.trim() || null,
+        parent_run_id: $("baseon").checked ? currentRun : null,
+      }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const { run_id } = await res.json();
+    currentRun = run_id;
+    userPinnedRun = false;
+    selectedTask = null;
+    $("req").value = "";
+    $("baseon").checked = false;
+  } catch (err) {
+    $("runstate").innerHTML = `<span class="err">submit failed: ${esc(err.message)}</span>`;
+  } finally {
+    $("go").disabled = false;
+  }
+}
+$("go").onclick = submit;
+$("req").addEventListener("keydown", e => { if (e.key === "Enter") submit(); });
+
+setInterval(render, 1000);
+connect();
+</script>
+</body>
+</html>

@@ -1,0 +1,105 @@
+#cloud-config
+# Used ONCE to bake template 9001 (pipez-builder). Superset of base-vendor.yaml.
+package_update: true
+ssh_pwauth: true
+
+packages:
+  - qemu-guest-agent
+  - git
+  - curl
+  - htop
+  - rsync
+  - unzip
+  - build-essential
+  - pkg-config
+  - python3-pip
+  - software-properties-common
+  - ca-certificates
+  - gnupg
+  - jq
+
+write_files:
+  - path: /etc/systemd/system/ttyd.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=ttyd web terminal (attaches to a persistent zellij session)
+      After=network-online.target
+
+      [Service]
+      Type=simple
+      User=etl
+      # Bound to localhost by design. Reach it over an SSH tunnel.
+      ExecStart=/usr/local/bin/ttyd -i lo -W -p 7681 /usr/local/bin/zellij attach -c main
+      Restart=always
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /usr/local/sbin/pipez-bake.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -ex
+      export DEBIAN_FRONTEND=noninteractive
+      systemctl enable --now qemu-guest-agent
+
+      # zellij + ttyd (same as base-vendor.yaml)
+      curl -fsSL -o /tmp/zellij.tgz https://github.com/zellij-org/zellij/releases/latest/download/zellij-x86_64-unknown-linux-musl.tar.gz
+      tar -xzf /tmp/zellij.tgz -C /usr/local/bin/
+      chmod +x /usr/local/bin/zellij
+      rm -f /tmp/zellij.tgz
+      curl -fsSL -o /usr/local/bin/ttyd https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64
+      chmod +x /usr/local/bin/ttyd
+      mkdir -p /home/etl/.config
+      chown -R etl:etl /home/etl/.config
+      systemctl daemon-reload
+      systemctl enable ttyd
+
+      # Python 3.12 (Ubuntu 26.04 ships 3.14 only; use the deadsnakes PPA)
+      add-apt-repository -y ppa:deadsnakes/ppa
+      apt-get update
+      apt-get install -y python3.12 python3.12-venv
+      # system python3 (3.14) needs venv + pip too (ensurepip is split out on Ubuntu)
+      apt-get install -y python3-venv python3-pip
+
+      # Node 20 (NodeSource)
+      curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+      apt-get install -y nodejs
+
+      # Docker CE (official apt repo)
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+      chmod a+r /etc/apt/keyrings/docker.asc
+      . /etc/os-release
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${UBUNTU_CODENAME:-$VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+      apt-get update
+      apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      usermod -aG docker etl
+      systemctl enable --now docker
+
+      # Claude Code CLI
+      npm install -g @anthropic-ai/claude-code
+
+      # Python venv with SDKs
+      mkdir -p /opt/pipez
+      python3.12 -m venv /opt/pipez/venv
+      /opt/pipez/venv/bin/pip install --upgrade pip
+      /opt/pipez/venv/bin/pip install anthropic claude-agent-sdk
+      chown -R etl:etl /opt/pipez
+
+      # No unattended upgrades (avoids apt locks at sandbox boot)
+      systemctl disable --now unattended-upgrades apt-daily.timer apt-daily-upgrade.timer || true
+      apt-get purge -y unattended-upgrades || true
+
+      # Version marker
+      {
+        echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "claude: $(timeout 60 claude --version </dev/null 2>&1)"
+        echo "node: $(node --version)"
+        echo "python: $(python3.12 --version)"
+        echo "docker: $(docker --version)"
+      } > /etc/pipez-builder-version
+
+runcmd:
+  - [ bash, -c, "/usr/local/sbin/pipez-bake.sh > /var/log/pipez-bake.log 2>&1" ]
