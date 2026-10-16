@@ -38,6 +38,8 @@
   #runstate { padding: 4px 18px 8px; color: var(--dim); font-size: 12px; }
   .err { color: var(--failed); }
   .art { margin-left: 8px; }
+  table.spend { width: auto; margin: 6px 0; font-size: 12px; }
+  table.spend th, table.spend td { padding: 2px 10px; text-align: left; }
   .art a { color: var(--accent); text-decoration: none; }
   .art a:hover { text-decoration: underline; }
   .verify-btn { padding: 1px 8px; font-size: 11px; font-weight: 400;
@@ -394,7 +396,8 @@ function render() {
       (arts.length ? ` · files:` + arts.map(a =>
         `<span class="art"><a href="/artifacts/${esc(run.id)}/${encodeURIComponent(a.filename)}" ` +
         `download>${esc(a.filename)}</a></span>`).join("") : "") +
-      stopButton(run) + sandboxBadge(run) + deployBadge(run) + verifySummary(run) + integrationFailure(run);
+      spendBadge(run) + stopButton(run) + sandboxBadge(run) + deployBadge(run) + verifySummary(run) + integrationFailure(run) +
+      spendTable(run);
   } else {
     state.textContent = "no runs yet — submit a task above";
   }
@@ -499,12 +502,47 @@ function verifySummary(run) {
     const hasGaps = [...(tasksByRun.get(run.id) || new Map()).values()]
       .some(t => t.status === "failed");
     return ` · <button class="verify-btn" onclick="verifyRun()">verify</button>` +
-      (hasGaps ? ` <button class="verify-btn" onclick="resumeRun()">heal gaps</button>` : "");
+      (hasGaps ? ` <button class="verify-btn" onclick="resumeRun()">resume</button>` : "");
   }
   if (run.status === "verifying") return " · verifying…";
   if (run.status === "failed" || run.status === "cancelled")
     return ` · <button class="verify-btn" onclick="resumeRun()">resume</button>`;
   return "";
+}
+
+const spendOpen = new Set();
+const spendByRun = new Map();
+
+function spendBadge(run) {
+  const usd = Number(run.cost_usd || 0);
+  if (!usd) return "";
+  const sp = spendByRun.get(run.id);
+  const tip = sp ? Object.entries(sp.by_stage).map(([k, v]) =>
+    `${k}: $${v.usd.toFixed(2)} (${v.calls})`).join("\n") : "click for spend breakdown";
+  return ` · <span class="art" style="cursor:pointer" title="${esc(tip)}" ` +
+    `onclick="toggleSpend('${esc(run.id)}')">$${usd.toFixed(2)}</span>`;
+}
+
+function spendTable(run) {
+  const sp = spendByRun.get(run.id);
+  if (!spendOpen.has(run.id) || !sp) return "";
+  const rows = Object.entries(sp.by_stage).map(([k, v]) =>
+    `<tr><td>${esc(k)}</td><td>${v.calls}</td>` +
+    `<td>${v.input_tokens + v.output_tokens}</td><td>$${v.usd.toFixed(2)}</td></tr>`).join("");
+  return `<table class="spend"><tr><th>stage</th><th>calls</th><th>tokens</th><th>$</th></tr>` +
+    rows + `</table>`;
+}
+
+async function toggleSpend(runId) {
+  if (spendOpen.has(runId)) spendOpen.delete(runId);
+  else {
+    spendOpen.add(runId);
+    try {
+      const res = await fetch(`/api/runs/${runId}/spend`);
+      if (res.ok) spendByRun.set(runId, await res.json());
+    } catch (err) { /* table stays hidden */ }
+  }
+  render();
 }
 
 function stopButton(run) {
@@ -540,16 +578,16 @@ function deployBadge(run) {
   if (!dp) return canDeploy ? " ·" + deployBtn : "";
   const undeployBtn = ` <button class="verify-btn" onclick="undeployRun()">Undeploy</button>`;
   if (dp.status === "ready")
-    return ` · Deployed: <a class="art" href="${esc(dp.url)}" target="_blank" rel="noopener">${esc(dp.url)}</a>` +
+    return ` · <span class="art">deploy: ready</span> <a class="art" href="${esc(dp.url)}" target="_blank" rel="noopener">${esc(dp.url)}</a>` +
       undeployBtn;
   if (dp.status === "failed") {
     const tail = String(dp.error || "").slice(-300);
-    return ` · <span class="err" title="${esc(dp.error || "")}">deploy failed: ${esc(tail)}</span>` +
+    return ` · <span class="err" title="${esc(dp.error || "")}">deploy: failed ${esc(tail)}</span>` +
       undeployBtn + (canDeploy ? deployBtn : "");
   }
   if (dp.status === "destroyed")
-    return ` · <span class="art">deployment destroyed</span>` + (canDeploy ? deployBtn : "");
-  return ` · <span class="art">deploy ${esc(dp.status)}…</span>`;
+    return ` · <span class="art">deploy: destroyed</span>` + (canDeploy ? deployBtn : "");
+  return ` · <span class="art">deploy: ${esc(dp.status)}…</span>`;
 }
 
 async function deployAction(what) {

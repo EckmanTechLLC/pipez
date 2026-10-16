@@ -82,6 +82,7 @@ def test_decision_schema_local_enum(monkeypatch):
     enum = decision_schema()["properties"]["subtasks"]["items"]["properties"]["tier"]["enum"]
     assert "local" not in enum
     monkeypatch.setattr(config, "MODEL_TIERS", dict(base, local={}))
+    monkeypatch.setattr(config, "LOCAL_ALLOWED_STAGES", ["decide"])
     enum = decision_schema()["properties"]["subtasks"]["items"]["properties"]["tier"]["enum"]
     assert "local" in enum
 

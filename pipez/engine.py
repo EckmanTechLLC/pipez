@@ -19,7 +19,8 @@ from .llm import LLMError
 from .prefs import PreferenceStore
 from .providers import OpenAICompatProvider
 from .deploy import Deployer, make_deploy_sandbox
-from .sandbox import make_sandbox
+from .pve import PveError, ProxmoxClient
+from .sandbox import make_sandbox, _reserved as _reserved_vmids
 
 logger = logging.getLogger("pipez.engine")
 
@@ -66,7 +67,7 @@ BASH_REPR = re.compile(r"name='Bash', input=\{'command': ('(?:[^'\\]|\\.)*'|\"(?
 
 class Engine:
     def __init__(self, db, bus, llm, prefs=None, sandbox_factory=None,
-                 deploy_factory=None):
+                 deploy_factory=None, pve_factory=None):
         self.db = db
         self.bus = bus
         self.llm = llm
@@ -79,7 +80,9 @@ class Engine:
         self._sandboxes: dict = {}
         self._deploy_factory = deploy_factory or make_deploy_sandbox
         self._deploys: dict = {}     # run_id -> deploy sandbox
+        self._pve_factory = pve_factory     # None: ProxmoxClient() when PVE is configured
         self._merge_locks: dict = {}
+        self._kills: set = set()     # in-flight remote runner kills
         self._local_down = False
         self._probe_task = None
         if "local" in config.MODEL_TIERS:
@@ -137,6 +140,20 @@ class Engine:
                 if not new:
                     raise
                 move(new, str(e))
+
+    def _add_spend(self, run_id, task_id, stage, usage, source="estimate", cost=None):
+        """Record one priced call in the spend ledger (never raises)."""
+        try:
+            usage = usage or {}
+            model = usage.get("model")
+            i, o = int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0)
+            if cost is None:
+                cost = config.estimate_cost(model, i, o)
+            self.db.add_spend(run_id, task_id, stage, model, i, o, cost, source)
+            if self.db.get_run(run_id):
+                self._publish_run(run_id)
+        except Exception:
+            logger.exception("recording spend for run %s failed", run_id)
 
     async def _run_llm_call(self, run_id: str, tier_name: str, fn):
         """Run-level counterpart of _llm_call (intake has no task row):
@@ -229,20 +246,26 @@ class Engine:
                 "decision is the same concept; invent a new dotted key only "
                 "for a genuinely new concept.\n" + "\n".join(lines))
 
+    def _intake_prompt(self, run: dict) -> tuple:
+        """(system, prompt) of the intake discovery call for a run row."""
+        system = self.db.get_prompt("intake_discovery") or ""
+        parts = ["# Request\n%s" % run["request"]]
+        if run.get("context"):
+            parts.append("# Project context\n%s" % run["context"])
+        parts.append(self._known_keys_section(run["project_id"]))
+        return system, "\n\n".join(parts)
+
     async def _intake(self, run_id: str):
         """Discovery: ask the deep tier for human-necessary decisions,
         pre-fill each from the preference store, pause as awaiting_human."""
         try:
             run = self.db.get_run(run_id)
-            system = self.db.get_prompt("intake_discovery") or ""
-            parts = ["# Request\n%s" % run["request"]]
-            if run.get("context"):
-                parts.append("# Project context\n%s" % run["context"])
-            parts.append(self._known_keys_section(run["project_id"]))
-            prompt = "\n\n".join(parts)
+            system, prompt = self._intake_prompt(run)
             started = time.time()
             (out, usage), tier_name = await self._run_llm_call(
-                run_id, "deep", lambda tier: self.llm.intake(system, prompt, tier))
+                run_id, "local" if config.local_allowed("intake") else "deep",
+                lambda tier: self.llm.intake(system, prompt, tier))
+            self._add_spend(run_id, None, "intake", usage)
             request_values = out.get("request_values") or {}
             decisions = []
             for d in out.get("decisions") or []:
@@ -352,6 +375,24 @@ class Engine:
                 sources.get(k, "intake"))))
         return "\n".join(rows)
 
+    def _brief_prompt(self, run: dict, sources: dict = None) -> tuple:
+        """(system, prompt) of the brief call for a run row; sources maps
+        decision key -> where its answer came from (default "intake")."""
+        decisions, answers = run["decisions"], run["answers"] or {}
+        table = self._decision_table(decisions, answers, sources or {})
+        opens = [d for d in decisions if d.get("free_text")]
+        resolved = "\n".join(
+            "- Q: %s\n  A: %s" % (d["question"], answers[d["key"]])
+            for d in opens if d["key"] in answers)
+        system = self.db.get_prompt("intake_brief") or ""
+        parts = ["# Original request\n%s" % run["request"]]
+        if run.get("context"):
+            parts.append("# Project context\n%s" % run["context"])
+        parts.append("# Answered decisions\n%s" % table)
+        if resolved:
+            parts.append("# Resolved open questions\n%s" % resolved)
+        return system, "\n\n".join(parts)
+
     async def _brief_and_start(self, run_id: str, sources: dict = None):
         try:
             run = self.db.get_run(run_id)
@@ -363,17 +404,12 @@ class Engine:
                 "- Q: %s\n  A: %s" % (d["question"], answers[d["key"]])
                 for d in opens if d["key"] in answers)
             rnd = max([d.get("round", 1) for d in opens] or [0]) + 1
-            system = self.db.get_prompt("intake_brief") or ""
-            parts = ["# Original request\n%s" % run["request"]]
-            if run.get("context"):
-                parts.append("# Project context\n%s" % run["context"])
-            parts.append("# Answered decisions\n%s" % table)
-            if resolved:
-                parts.append("# Resolved open questions\n%s" % resolved)
-            prompt = "\n\n".join(parts)
+            system, prompt = self._brief_prompt(run, sources)
             started = time.time()
             (out, usage), tier_name = await self._run_llm_call(
-                run_id, "standard", lambda tier: self.llm.brief(system, prompt, tier))
+                run_id, "local" if config.local_allowed("brief") else "standard",
+                lambda tier: self.llm.brief(system, prompt, tier))
+            self._add_spend(run_id, None, "brief", usage)
             text = out["brief"].rstrip()
             if out.get("constraints"):
                 text += "\n\n## Constraints\n" + "\n".join(
@@ -452,6 +488,7 @@ class Engine:
             if run.get("context"):
                 parts.append("# Project context\n%s" % run["context"])
             parts.append("# Build brief (binding)\n%s" % run.get("brief"))
+            system += "\n\nAllowed tiers: %s." % ", ".join(config.offered_tiers("plan"))
             if run.get("plan") and revisions:
                 parts.append("# Previous plan\n%s"
                              % json.dumps(run["plan"], indent=2))
@@ -463,6 +500,7 @@ class Engine:
             (out, usage), tier_name = await self._run_llm_call(
                 run_id, "deep", lambda tier: self.llm.plan(
                     system, prompt, dict(tier, effort=config.PLAN_EFFORT)))
+            self._add_spend(run_id, None, "plan", usage)
             plan = self._validate_plan(run_id, out)
             warnings = []
             nt, nm = len(plan.get("tasks") or []), len(plan.get("modules") or [])
@@ -668,6 +706,11 @@ class Engine:
         self._publish_task(root)
         children = []
         for i, t in enumerate(plan["tasks"]):
+            if t.get("tier") == "local":    # code tasks run on the Agent SDK
+                self.db.log("run:%s" % run_id, "tier_coerced",
+                            {"task": t.get("id"), "from": "local", "to": "light",
+                             "reason": "code tasks run on the Agent SDK"})
+                t["tier"] = "light"
             mod = modules.get(t.get("module"))
             prompt = t["prompt"]
             if mod:
@@ -785,11 +828,157 @@ class Engine:
         if t is not None and not t.done():
             t.cancel()
             await asyncio.gather(t, return_exceptions=True)
+            await asyncio.gather(*list(self._kills), return_exceptions=True)
         elif run["status"] == "deploying":     # orphaned (server restarted)
             await self._abort_deploy(run_id, "stopped by user")
         self._mark_cancelled(run_id)
         self.db.log("run:" + run_id, "stopped", {})
         return self.db.get_run(run_id)
+
+    # -- restart recovery and orphan sweep (task 15) ---------------------------
+
+    INTERRUPTIBLE = ("intake", "briefing", "planning", "provisioning", "running",
+                     "deploying", "verifying")
+    INTERRUPTED = "interrupted by server restart"
+
+    async def recover(self) -> dict:
+        """Called once at startup, before serving. Nothing is auto-resumed:
+        runs that were mid-flight become `failed` ("interrupted by server
+        restart") and the human resumes them; their live sandboxes are kept so
+        resume reuses them, half-built deploy VMs are destroyed."""
+        out = {"runs": [], "sandboxes": [], "deployments": []}
+        for run in self.db.get_runs(limit=100000):
+            rid = run["id"]
+            if run["status"] not in self.INTERRUPTIBLE or self._alive(rid):
+                continue
+            for t in self.db.get_tasks(rid):
+                if t["status"] in ACTIVE_TASK:
+                    self._update(t["id"], status="cancelled", error=self.INTERRUPTED,
+                                 finished_at=time.time())
+                    self.db.log(t["id"], "cancelled", {"was": t["status"]})
+            self.db.finish_run(rid, "failed", error=self.INTERRUPTED)
+            self.db.log("run:" + rid, "interrupted", {"was": run["status"]})
+            self._publish_run(rid)
+            out["runs"].append(rid)
+        for row in self.db.list_sandboxes():
+            rid = row["run_id"]
+            if row["status"] not in ("provisioning", "ready") or self._alive(rid):
+                continue
+            try:
+                sb = self._sandbox_factory(rid)
+                if row["kind"] != sb.kind:
+                    logger.warning("recover: sandbox of run %s is %s, not %s; left alone",
+                                   rid, row["kind"], sb.kind)
+                    continue
+                sb.adopt(row)
+                alive = bool(row.get("vmid") or row["kind"] == "mock") and await sb.alive()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("recover: sandbox of run %s not checked: %s", rid, e)
+                alive = False
+            if alive:
+                try:
+                    await sb.kill_runner()      # the agent may still be running there
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("recover: runner kill on run %s failed: %s", rid, e)
+                self._sandbox_row(rid, status="kept", kept=1)
+                self.db.log("run:" + rid, "sandbox_kept",
+                            {"vmid": row["vmid"], "ip": row["ip"], "recovered": True})
+            else:
+                self._sandbox_row(rid, status="destroyed", destroyed_at=time.time(),
+                                  kept=0, error=self.INTERRUPTED)
+            out["sandboxes"].append({"run_id": rid, "kept": alive})
+        for row in self.db.list_deployments():
+            rid = row["run_id"]
+            if row["status"] not in ("provisioning", "installing", "starting") \
+                    or self._alive(rid):
+                continue
+            try:
+                await self._destroy_deploy_vm(rid, row)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("recover: deploy VM of run %s not destroyed: %s", rid, e)
+            self.db.upsert_deployment(rid, status="failed", error=self.INTERRUPTED)
+            self.db.log("run:" + rid, "deploy_failed", {"error": self.INTERRUPTED})
+            self._publish_deployment(rid)
+            out["deployments"].append(rid)
+        return out
+
+    @staticmethod
+    def _vmid_range(spec: str) -> range:
+        lo, _, hi = spec.partition("-")
+        return range(int(lo), int(hi or lo) + 1)
+
+    async def sweep(self) -> list:
+        """Reconcile the Proxmox pool with the DB. Pool VMs in the sandbox or
+        deploy VMID range that no live row tracks are reported as
+        {vmid, name, action} (destroyed when PIPEZ_SWEEP_DESTROY=1); rows that
+        claim a VM which is gone become `destroyed`. No-op without PVE."""
+        if self._pve_factory is None and (config.MOCK or config.SANDBOX == "mock"
+                                          or not config.PVE_URL):
+            return []
+        ranges = [self._vmid_range(config.PVE_VMID_RANGE),
+                  self._vmid_range(config.DEPLOY_VMID_RANGE)]
+        in_range = lambda v: any(v in r for r in ranges)  # noqa: E731
+        client = self._pve_factory() if self._pve_factory else ProxmoxClient()
+        owned = self._pve_factory is None
+        report: list = []
+        try:
+            try:
+                members = [int(v) for v in await client.pool_members(config.PVE_POOL)]
+            except PveError as e:
+                logger.warning("sweep: pool listing failed: %s", e)
+                return []
+            member_set = set(members)
+            tracked: set = set()
+            sandboxes = self.db.list_sandboxes()
+            deps = self.db.list_deployments()
+            for r in sandboxes:
+                if r["status"] in ("provisioning", "ready", "kept", "failed", "destroying"):
+                    tracked.add(r["vmid"])
+            for d in deps:
+                if d["status"] in self.ACTIVE_DEPLOY + ("failed",):
+                    tracked.add(d["vmid"])
+            live = {r["run_id"] for r in sandboxes + deps if self._alive(r["run_id"])
+                    or r["run_id"] in self._sandboxes or r["run_id"] in self._deploys}
+            for vmid in sorted(member_set):
+                if not in_range(vmid) or vmid in tracked or vmid in _reserved_vmids:
+                    continue
+                entry = {"vmid": vmid, "name": None, "action": "reported"}
+                if config.SWEEP_DESTROY:
+                    assert in_range(vmid), "sweep must never touch vmid %s" % vmid
+                    try:
+                        try:
+                            await client.wait_task(await client.stop(vmid))
+                        except PveError:
+                            pass        # already stopped
+                        await client.wait_task(await client.destroy(vmid))
+                        entry["action"] = "destroyed"
+                    except PveError as e:
+                        entry["action"] = "destroy_failed: %s" % e
+                logger.warning("sweep: orphan VM %s -> %s", vmid, entry["action"])
+                report.append(entry)
+            for r in sandboxes:
+                if (r["status"] in ("kept", "ready", "provisioning") and r["vmid"]
+                        and r["vmid"] not in member_set and r["run_id"] not in live):
+                    self._sandbox_row(r["run_id"], status="destroyed",
+                                      destroyed_at=time.time(), kept=0,
+                                      error="VM no longer exists")
+                    report.append({"vmid": r["vmid"], "name": r["name"],
+                                   "action": "row_destroyed"})
+            for d in deps:
+                if (d["status"] in self.ACTIVE_DEPLOY and d["vmid"]
+                        and d["vmid"] not in member_set and d["run_id"] not in live):
+                    self.db.upsert_deployment(d["run_id"], status="destroyed", url=None,
+                                              destroyed_at=time.time(),
+                                              error="VM no longer exists")
+                    self._publish_deployment(d["run_id"])
+                    report.append({"vmid": d["vmid"], "name": d["name"],
+                                   "action": "row_destroyed"})
+            if report:
+                self.db.log("sweep", "sweep", {"report": report})
+        finally:
+            if owned:
+                await client.aclose()
+        return report
 
     def _set_run_waiting(self, run_id: str):
         self.db.set_run_status(run_id, "awaiting_human")
@@ -1390,6 +1579,7 @@ class Engine:
             result, usage = await self._synthesize(task, succeeded, failed,
                                                    integration)
             self.db.add_tokens(task_id, usage["input_tokens"], usage["output_tokens"])
+            self._add_spend(task["run_id"], task_id, "synthesize", usage)
             self._update(task_id, status="done", result=json.dumps(result),
                          finished_at=time.time())
             return result, True
@@ -1431,6 +1621,7 @@ class Engine:
                     verdicts, usage = await self.llm.verify(system, prompt, tier)
                 self.db.add_tokens(root["id"], usage["input_tokens"],
                                    usage["output_tokens"])
+                self._add_spend(run_id, root["id"], "verify", usage)
                 self.db.add_verification(run_id, section["id"],
                                          verdicts.get("verdicts", []),
                                          verdicts.get("summary", ""))
@@ -1458,6 +1649,7 @@ class Engine:
                         verdicts, usage = await self.llm.verify(cross_system, prompt, tier)
                     self.db.add_tokens(root["id"], usage["input_tokens"],
                                        usage["output_tokens"])
+                    self._add_spend(run_id, root["id"], "verify", usage)
                     self.db.add_verification(run_id, root["id"],
                                              verdicts.get("verdicts", []),
                                              verdicts.get("summary", ""))
@@ -1502,6 +1694,7 @@ class Engine:
             async with self.semaphore:
                 files, usage = await self.llm.render_artifacts(system, prompt, dest, tier)
             self.db.add_tokens(root["id"], usage["input_tokens"], usage["output_tokens"])
+            self._add_spend(run_id, root["id"], "render", usage)
             for f in files:
                 self.db.add_artifact(run_id, f["filename"], f["path"], f["bytes"])
             self.db.log(root["id"], "artifacts", {"files": [f["filename"] for f in files]})
@@ -1526,6 +1719,7 @@ class Engine:
                 return await self._execute_code_task(task, dep_values)
             decision, usage = await self._decide(task)
             self.db.add_tokens(task_id, usage["input_tokens"], usage["output_tokens"])
+            self._add_spend(task["run_id"], task_id, "decide", usage)
             self._update(task_id, action=decision["action"], model=usage["model"])
             self.db.log(task_id, "decision", {"action": decision["action"],
                                               "reasoning": decision.get("reasoning")})
@@ -1607,7 +1801,10 @@ class Engine:
                 raise ScaffoldError("scaffold_failed: %s: %s" % (cmd, self._tail(r["stderr"])))
 
     def _leaf_model(self, task: dict) -> str:
-        tier = config.MODEL_TIERS.get(task.get("tier") or "") or config.MODEL_TIERS["standard"]
+        name = task.get("tier") or ""
+        if name == "local":     # code tasks never run on local
+            name = "light"
+        tier = config.MODEL_TIERS.get(name) or config.MODEL_TIERS["standard"]
         if tier.get("provider") != "anthropic":
             tier = config.MODEL_TIERS["standard"]
         return tier["model"]
@@ -1782,6 +1979,22 @@ Do not modify any other file in the worktree.
                         "re-apply your changes on top of them, do not overwrite unrelated "
                         "content." % listed}
 
+    async def _kill_runner(self, sb, task_id: str = None):
+        """Best-effort remote kill of a runner's process group, shielded so a
+        cancelled caller still completes it."""
+        async def go():
+            try:
+                await sb.kill_runner(task_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("remote runner kill (%s) failed: %s", task_id or "all", e)
+        fut = asyncio.ensure_future(go())
+        self._kills.add(fut)
+        fut.add_done_callback(self._kills.discard)
+        try:
+            await asyncio.shield(fut)
+        except asyncio.CancelledError:
+            pass        # cancelled again: the kill still runs to completion
+
     async def _diagnose_lost_runner(self, sb, log_path: str, rc) -> str:
         """Error text for a runner that produced no result: the last Bash commands
         from the tail of its log, and a hint when one was a broad kill."""
@@ -1898,8 +2111,20 @@ Do not modify any other file in the worktree.
                        config.LEAF_MAX_TURNS, config.LEAF_MAX_BUDGET_USD,
                        q("%s/logs/%s.jsonl" % (wd, task_id))))
             env = {"ANTHROPIC_API_KEY": config.ANTHROPIC_API_KEY} if config.ANTHROPIC_API_KEY else None
-            async with self.semaphore:
-                r = await sb.run(cmd, cwd=wt, env=env, timeout=config.LEAF_TIMEOUT)
+            # Start the runner in its own session and record the group id, so a
+            # stop (or a restart) can kill it remotely: killing the local ssh
+            # alone leaves the agent running in the VM.
+            pidf = q("%s/run/%s.pid" % (wd, task_id))
+            wrapped = ("mkdir -p %s; setsid %s & p=$!; echo $p > %s; wait $p; rc=$?; "
+                       "rm -f %s; exit $rc" % (q("%s/run" % wd), cmd, pidf, pidf))
+            try:
+                async with self.semaphore:
+                    r = await sb.run(wrapped, cwd=wt, env=env, timeout=config.LEAF_TIMEOUT)
+            except asyncio.CancelledError:
+                await self._kill_runner(sb, task_id)
+                raise
+            if r["rc"] == 124:          # timed out: the remote group outlives the ssh
+                await self._kill_runner(sb, task_id)
             out = None
             for line in reversed((r["stdout"] or "").splitlines()):
                 try:
@@ -1922,6 +2147,12 @@ Do not modify any other file in the worktree.
                 self.db.add_tokens(task_id, int(out.get("input_tokens") or 0),
                                    int(out.get("output_tokens") or 0))
                 self.db.add_cost(task_id, out.get("cost_usd") or 0)
+                self._add_spend(run_id, task_id,
+                            "review" if review else "fix" if direct else "leaf",
+                            {"model": model,
+                             "input_tokens": out.get("input_tokens"),
+                             "output_tokens": out.get("output_tokens")},
+                            source="reported", cost=float(out.get("cost_usd") or 0))
                 tests = out.get("tests")
                 self.db.log(task_id, "runner", {k: out.get(k) for k in (
                     "ok", "commit", "files_changed", "tests", "cost_usd", "num_turns",
@@ -2046,6 +2277,7 @@ Do not modify any other file in the worktree.
         self._update(task_id, status="synthesizing")
         result, usage = await self._synthesize(task, succeeded, failed)
         self.db.add_tokens(task_id, usage["input_tokens"], usage["output_tokens"])
+        self._add_spend(task["run_id"], task_id, "synthesize", usage)
         self._update(task_id, status="done", result=json.dumps(result),
                      finished_at=time.time())
         return result

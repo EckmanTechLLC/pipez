@@ -141,3 +141,19 @@ When the plan has `deploy.target == "vm"` (the architect fills it when the brief
 - State: table `deployments` (status `provisioning|installing|starting|ready|failed|destroyed`, `url`, `error`, `log`); `GET /api/runs/{id}/deployment`, `GET /api/deployments`; SSE `deployment` events and a snapshot entry. A failure marks the deployment `failed` (`deploy_failed` logged with the tail) and keeps the VM for inspection; the run stays `done`. Stop while `deploying` destroys the VM and marks the deployment `failed`; the run returns to `done`.
 - Mock mode: the "VM" is a temp dir, the service a local background process (a free port is used if the plan's is busy), `sudo`/`apt` install commands are skipped, there is no systemd; undeploy kills it.
 - UI: run header shows `Deployed: <url>`, the failure tail, and Deploy / Undeploy buttons; the plan panel shows the deploy target, port, health path and install-command count.
+
+## Local tier
+An optional `local` tier (OpenAI-compatible endpoint, e.g. vLLM serving qwen3.6) exists when
+`PIPEZ_LOCAL_BASE_URL` and `PIPEZ_LOCAL_MODEL` are set. Measured throughput is about 9 output
+tokens/s, so long outputs take minutes; `PIPEZ_LOCAL_TIMEOUT` bounds a call and a truncated
+response reports its elapsed seconds and output tokens. Code tasks never run on `local` (a plan
+task with `tier=local` is coerced to `light`, logged as `tier_coerced`). `PIPEZ_LOCAL_STAGES`
+(comma list of `intake,brief,plan,decide,synthesize`, default empty) lists the stages that may
+auto-select `local`; with it empty `local` is used only by an explicit task tier override and by
+the benchmark. To decide where to allow it, replay stored runs through the tiers:
+
+    python scripts/bench_local.py --db pipez.sqlite3 --runs all --stages intake,brief \
+        --tiers local,light,standard --out bench --max-per-stage 2 [--dry-run] [--yes]
+
+It needs `ANTHROPIC_API_KEY` and `PIPEZ_LOCAL_*` in the environment, prints the estimated spend
+first and requires `--yes`; the source DB is copied, never modified.

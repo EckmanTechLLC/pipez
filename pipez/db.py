@@ -151,6 +151,20 @@ MIGRATIONS = [
         updated_at REAL NOT NULL,
         retired_at REAL
     )""",
+    "ALTER TABLE runs ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0",
+    """CREATE TABLE IF NOT EXISTS spend (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id        TEXT NOT NULL,
+        task_id       TEXT,
+        stage         TEXT NOT NULL,
+        model         TEXT,
+        input_tokens  INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd      REAL NOT NULL DEFAULT 0,
+        source        TEXT NOT NULL DEFAULT 'estimate',
+        created_at    REAL NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_spend_run ON spend(run_id)",
 ]
 
 
@@ -460,6 +474,43 @@ class Database:
             "UPDATE tasks SET cost_usd=COALESCE(cost_usd, 0)+?, updated_at=? WHERE id=?",
             (float(cost_usd or 0), time.time(), task_id),
         )
+
+    def add_spend(self, run_id, task_id, stage, model, input_tokens,
+                  output_tokens, cost_usd, source="estimate"):
+        """Append a ledger row and add its cost to runs.cost_usd."""
+        cost = float(cost_usd or 0)
+        self._exec(
+            "INSERT INTO spend (run_id, task_id, stage, model, input_tokens, "
+            "output_tokens, cost_usd, source, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, task_id, stage, model, int(input_tokens or 0),
+             int(output_tokens or 0), cost, source, time.time()))
+        self._exec("UPDATE runs SET cost_usd=COALESCE(cost_usd, 0)+? WHERE id=?",
+                   (cost, run_id))
+
+    def get_spend(self, run_ids):
+        """Roll-up over the given runs: {total_usd, by_stage, by_model}."""
+        if isinstance(run_ids, str):
+            run_ids = [run_ids]
+        out = {"total_usd": 0.0, "by_stage": {}, "by_model": {}}
+        if not run_ids:
+            return out
+        marks = ",".join("?" * len(run_ids))
+        rows = self._query(
+            "SELECT stage, model, COUNT(*) AS calls, SUM(cost_usd) AS usd, "
+            "SUM(input_tokens) AS i, SUM(output_tokens) AS o FROM spend "
+            "WHERE run_id IN (%s) GROUP BY stage, model" % marks, tuple(run_ids))
+        for r in rows:
+            for key, name in (("by_stage", r["stage"]),
+                              ("by_model", r["model"] or "unknown")):
+                b = out[key].setdefault(name, {"usd": 0.0, "calls": 0,
+                                               "input_tokens": 0, "output_tokens": 0})
+                b["usd"] += r["usd"] or 0
+                b["calls"] += r["calls"]
+                b["input_tokens"] += r["i"] or 0
+                b["output_tokens"] += r["o"] or 0
+            out["total_usd"] += r["usd"] or 0
+        return out
 
     def get_task(self, task_id):
         rows = self._query("SELECT * FROM tasks WHERE id=?", (task_id,))

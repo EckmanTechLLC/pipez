@@ -1,0 +1,69 @@
+{
+  "db": "/tmp/claude-1000/-home-etl-projects-pipez/da67daff-717b-431c-aaf0-b7dcbbb0d8fb/scratchpad/bench/vm.sqlite3",
+  "tiers": [
+    "light",
+    "standard"
+  ],
+  "stages": [
+    "intake"
+  ],
+  "estimated_spend": 0.0658791,
+  "results": [
+    {
+      "run_id": "60cd5166f16a",
+      "stage": "intake",
+      "tier": "light",
+      "model": "claude-haiku-5-5",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 8.78,
+      "input_tokens": 6840,
+      "output_tokens": 1768,
+      "cost": 0.001568,
+      "key_jaccard": 0.14285714285714285,
+      "default_agree": 0.6666666666666666
+    },
+    {
+      "run_id": "60cd5166f16a",
+      "stage": "intake",
+      "tier": "standard",
+      "model": "claude-sonnet-5-5",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 17.38,
+      "input_tokens": 6840,
+      "output_tokens": 2562,
+      "cost": 0.0393,
+      "key_jaccard": 0.45,
+      "default_agree": 0.8888888888888888
+    },
+    {
+      "run_id": "c6973d74ac0e",
+      "stage": "intake",
+      "tier": "light",
+      "model": "claude-haiku-5-5",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 14.85,
+      "input_tokens": 6764,
+      "output_tokens": 3243,
+      "cost": 0.0022979000000000003,
+      "key_jaccard": 0.6470588235294118,
+      "default_agree": 0.9090909090909091
+    },
+    {
+      "run_id": "c6973d74ac0e",
+      "stage": "intake",
+      "tier": "standard",
+      "model": "claude-sonnet-5-5",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 13.16,
+      "input_tokens": 6764,
+      "output_tokens": 2144,
+      "cost": 0.034968,
+      "key_jaccard": 0.6470588235294118,
+      "default_agree": 0.9090909090909091
+    }
+  ]
+}

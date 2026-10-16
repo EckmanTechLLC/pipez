@@ -82,7 +82,7 @@ def decision_schema() -> dict:
     configured right now (so `local` appears only when it exists)."""
     schema = copy.deepcopy(_DECISION_SCHEMA)
     schema["properties"]["subtasks"]["items"]["properties"]["tier"]["enum"] = \
-        list(config.MODEL_TIERS)
+        config.offered_tiers("decide")
     return schema
 
 
@@ -251,7 +251,7 @@ def plan_schema() -> dict:
     configured right now."""
     schema = copy.deepcopy(_PLAN_SCHEMA)
     schema["properties"]["tasks"]["items"]["properties"]["tier"]["enum"] = \
-        list(config.MODEL_TIERS)
+        config.offered_tiers("plan")
     return schema
 
 
@@ -370,7 +370,7 @@ class MockLLM:
             "reasoning": "mock decomposition",
             "shared_context": "mock shared context from depth %d" % depth,
             "subtasks": subtasks,
-        }, {"input_tokens": 0, "output_tokens": 0, "model": "mock"}
+        }, {"input_tokens": 1000, "output_tokens": 100, "model": "mock"}
 
     async def synthesize(self, system: str, prompt: str,
                          tier: dict = None) -> tuple[dict, dict]:
@@ -379,14 +379,14 @@ class MockLLM:
                 "output": "mock synthesized output",
                 "facts": [{"claim": "mock synthesized fact", "value": "42",
                            "source": "model-knowledge"}]}, \
-               {"input_tokens": 0, "output_tokens": 0, "model": "mock"}
+               {"input_tokens": 1000, "output_tokens": 100, "model": "mock"}
 
     def _complete(self):
         return {"action": "complete", "reasoning": "mock leaf",
                 "result": {"summary": "mock leaf done", "output": "mock leaf output",
                            "facts": [{"claim": "mock fact", "value": "3.14",
                                       "source": "https://example.com/mock"}]}}, \
-               {"input_tokens": 0, "output_tokens": 0, "model": "mock"}
+               {"input_tokens": 1000, "output_tokens": 100, "model": "mock"}
 
     async def intake(self, system: str, prompt: str,
                      tier: dict = None) -> tuple[dict, dict]:
@@ -412,7 +412,7 @@ class MockLLM:
                  "options": opts("vm", "container", "static"),
                  "proposed_default": "container", "required": False},
             ],
-        }, {"input_tokens": 0, "output_tokens": 0, "model": "mock"}
+        }, {"input_tokens": 1000, "output_tokens": 100, "model": "mock"}
 
     async def brief(self, system: str, prompt: str,
                     tier: dict = None) -> tuple[dict, dict]:
@@ -424,7 +424,7 @@ class MockLLM:
                          "honouring the decisions below.",
                 "constraints": ["Honour every decision in the table."],
                 "open_questions": oq}, \
-               {"input_tokens": 0, "output_tokens": 0, "model": "mock"}
+               {"input_tokens": 1000, "output_tokens": 100, "model": "mock"}
 
     async def plan(self, system: str, prompt: str,
                    tier: dict = None) -> tuple[dict, dict]:
@@ -469,7 +469,7 @@ class MockLLM:
                 "health_path": "/",
                 "env": [],
             },
-        }, {"input_tokens": 0, "output_tokens": 0, "model": "mock"}
+        }, {"input_tokens": 1000, "output_tokens": 100, "model": "mock"}
 
     async def verify(self, system: str, prompt: str,
                      tier: dict = None) -> tuple[dict, dict]:
@@ -480,7 +480,7 @@ class MockLLM:
                      "note": "matches mock source", "correction": ""},
                     {"claim": "mock synthesized fact", "verdict": "unverifiable",
                      "note": "no source available", "correction": ""},
-                ]}, {"input_tokens": 0, "output_tokens": 0, "model": "mock"}
+                ]}, {"input_tokens": 1000, "output_tokens": 100, "model": "mock"}
 
     async def render_artifacts(self, system: str, prompt: str,
                                dest_dir: str, tier: dict = None) -> tuple[list, dict]:
@@ -494,7 +494,7 @@ class MockLLM:
                 f.write(content)
             files.append({"filename": name, "path": path,
                           "bytes": os.path.getsize(path)})
-        return files, {"input_tokens": 0, "output_tokens": 0, "model": "mock"}
+        return files, {"input_tokens": 1000, "output_tokens": 100, "model": "mock"}
 
 
 def make_llm():

@@ -3,6 +3,7 @@
 lifecycle, command execution and file transfer.
 """
 import asyncio
+import glob
 import os
 import posixpath
 import shlex
@@ -55,6 +56,7 @@ class Sandbox:
         self.run_id = run_id
         self._secrets: dict = {}
         self.last_command = None   # hook: the most recently composed line
+        self.killed: list = []     # process-group ids kill_runner() was asked to kill
 
     async def provision(self): raise NotImplementedError
 
@@ -73,6 +75,20 @@ class Sandbox:
 
     async def _exec(self, line: str, stdin, timeout) -> tuple:
         raise NotImplementedError
+
+    async def kill_runner(self, task_id: str = None) -> dict:
+        """Kill the remote runner process group(s) recorded in <workdir>/run/
+        <task_id>.pid (all of them when task_id is None): TERM, then KILL after
+        5 s. Best effort; a missing pid file is a no-op."""
+        pat = shlex.quote(task_id) if task_id else "*"
+        script = (
+            'for f in %s/run/%s.pid; do [ -f "$f" ] || continue; p=$(cat "$f"); '
+            'case "$p" in ""|*[!0-9]*) rm -f "$f"; continue;; esac; '
+            'kill -TERM -- -"$p" 2>/dev/null; n=0; '
+            'while kill -0 -- -"$p" 2>/dev/null && [ $n -lt 50 ]; do sleep 0.1; n=$((n+1)); done; '
+            'kill -KILL -- -"$p" 2>/dev/null; rm -f "$f"; done; true'
+            % (shlex.quote(self.workdir), pat))
+        return await self.run(script, timeout=20)
 
     async def git(self, args, cwd=None, **kw) -> dict:
         """`git <args>` via run(); args is a list (quoted here) or a string."""
@@ -100,6 +116,16 @@ class Sandbox:
         return content.encode() if isinstance(content, str) else content
 
 
+async def _reap(proc):
+    """Kill the local child. Bounded wait: a detached grandchild (the setsid'd
+    runner of a mock sandbox) can hold the pipes open long after the shell died."""
+    proc.kill()
+    try:
+        await asyncio.wait_for(proc.wait(), 2)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
+
+
 async def _spawn(argv, stdin, timeout) -> tuple:
     proc = await asyncio.create_subprocess_exec(
         *argv, stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
@@ -108,12 +134,10 @@ async def _spawn(argv, stdin, timeout) -> tuple:
         out, err = await asyncio.wait_for(
             proc.communicate(stdin.encode() if isinstance(stdin, str) else stdin), timeout)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await _reap(proc)
         return 124, b"", b"timed out after %ss" % str(timeout).encode()
     except asyncio.CancelledError:      # run stopped: do not leave the child running
-        proc.kill()
-        await proc.wait()
+        await _reap(proc)
         raise
     return proc.returncode, out, err
 
@@ -142,6 +166,15 @@ class MockSandbox(Sandbox):
 
     async def _exec(self, line, stdin, timeout):
         return await _spawn(["bash", "-c", line], stdin, timeout)
+
+    async def kill_runner(self, task_id: str = None) -> dict:
+        for f in glob.glob(os.path.join(self.workdir, "run", "%s.pid" % (task_id or "*"))):
+            try:
+                with open(f) as fh:
+                    self.killed.append(int(fh.read().strip()))
+            except (OSError, ValueError):
+                pass
+        return await super().kill_runner(task_id)
 
     async def put(self, path, content, mode=0o644):
         p = self._path(path)

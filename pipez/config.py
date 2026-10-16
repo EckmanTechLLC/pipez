@@ -3,6 +3,8 @@
 A .env file in the project root is loaded first (KEY=value lines; existing
 environment wins), so the API key can live with the project.
 """
+import json
+import logging
 import os
 
 _env_file = os.path.join(os.path.dirname(__file__), "..", ".env")
@@ -31,10 +33,56 @@ LOCAL_API_KEY = os.environ.get("PIPEZ_LOCAL_API_KEY", "")
 LOCAL_TIMEOUT = float(os.environ.get("PIPEZ_LOCAL_TIMEOUT", "600"))
 LOCAL_TEMPERATURE = float(os.environ.get("PIPEZ_LOCAL_TEMPERATURE", "0.2"))
 LOCAL_THINKING = os.environ.get("PIPEZ_LOCAL_THINKING", "0") == "1"
+# Stages whose calls may start on `local` (intake, brief, plan, decide,
+# synthesize). Empty (default): `local` is never auto-selected; it stays
+# usable by an explicit task tier override and by the benchmark.
+LOCAL_ALLOWED_STAGES = [s.strip() for s in
+                        os.environ.get("PIPEZ_LOCAL_STAGES", "").split(",")
+                        if s.strip()]
+
+
+def local_allowed(stage: str) -> bool:
+    """True when `local` exists and may be auto-selected for `stage`."""
+    return "local" in MODEL_TIERS and stage in LOCAL_ALLOWED_STAGES
+
+
+def offered_tiers(stage: str) -> list:
+    """The tier names a planner/decide prompt may offer for `stage`."""
+    return [t for t in MODEL_TIERS if t != "local" or local_allowed(stage)]
+
+
 if LOCAL_BASE_URL:
     MODEL_TIERS["local"] = {"provider": "openai_compat", "model": LOCAL_MODEL,
                             "effort": "low", "base_url": LOCAL_BASE_URL}
 DEFAULT_TIER = "deep"
+
+# List prices, USD per million tokens (input, output), keyed by model id.
+# PIPEZ_PRICES_JSON ({"model": [in, out]}) is merged over these defaults.
+PRICES_PER_MTOK = {
+    "claude-opus-5-5": (4.0, 20.0),
+    "claude-sonnet-5-5": (2.0, 10.0),
+    "claude-haiku-5-5": (0.10, 0.50),
+}
+try:
+    for _m, _p in json.loads(os.environ.get("PIPEZ_PRICES_JSON") or "{}").items():
+        PRICES_PER_MTOK[_m] = (float(_p[0]), float(_p[1]))
+except (ValueError, TypeError, IndexError, AttributeError):
+    logging.getLogger(__name__).warning("ignoring invalid PIPEZ_PRICES_JSON")
+if LOCAL_MODEL:
+    PRICES_PER_MTOK.setdefault(LOCAL_MODEL, (0.0, 0.0))
+_WARNED_MODELS = set()
+
+
+def estimate_cost(model, input_tokens, output_tokens) -> float:
+    """USD estimate from PRICES_PER_MTOK; unknown model -> 0 (warned once)."""
+    price = PRICES_PER_MTOK.get(model)
+    if price is None:
+        if model not in _WARNED_MODELS:
+            _WARNED_MODELS.add(model)
+            logging.getLogger(__name__).warning(
+                "no price for model %r; spend estimated as 0", model)
+        return 0.0
+    return ((input_tokens or 0) * price[0] + (output_tokens or 0) * price[1]) / 1e6
 
 # Escalate a failed call to the next tier up (cheapest first).
 ESCALATE_ON_FAILURE = os.environ.get("PIPEZ_ESCALATE", "1") == "1"
@@ -133,6 +181,10 @@ SANDBOX = os.environ.get("PIPEZ_SANDBOX", "mock" if MOCK else "pve")
 SANDBOX_BOOT_TIMEOUT = float(os.environ.get("PIPEZ_SANDBOX_BOOT_TIMEOUT", "240"))
 SSH_KEY = os.path.expanduser(os.environ.get("PIPEZ_SSH_KEY", "~/.ssh/pipez_ed25519"))
 SANDBOX_KEEP_ON_FAILURE = os.environ.get("PIPEZ_SANDBOX_KEEP_ON_FAILURE", "1") == "1"
+
+# Orphan sweep (task 15): destroy pool VMs in the sandbox/deploy ranges that no DB
+# row tracks. Off: they are only reported.
+SWEEP_DESTROY = os.environ.get("PIPEZ_SWEEP_DESTROY", "0") == "1"
 
 # Debug: keep mock sandbox temp dirs after teardown (inspect repo/worktrees).
 SANDBOX_KEEP = os.environ.get("PIPEZ_SANDBOX_KEEP", "0") == "1"

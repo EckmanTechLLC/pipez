@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import time
 
 import httpx2 as httpx  # anthropic 1.13 depends on httpx2, not httpx
 
@@ -223,6 +224,7 @@ class OpenAICompatProvider(Provider):
             "chat_template_kwargs": {"enable_thinking": config.LOCAL_THINKING},
         }
         try:
+            started = time.monotonic()
             async with self._client(config.LOCAL_TIMEOUT) as client:
                 resp = await client.post(base + "/v1/chat/completions",
                                          json=body, headers=self._headers())
@@ -241,7 +243,10 @@ class OpenAICompatProvider(Provider):
         except (KeyError, IndexError, TypeError):
             raise LLMError("malformed local provider response: %s" % resp.text[:500])
         if choice.get("finish_reason") == "length":
-            raise LLMError("response truncated at max_tokens")
+            elapsed = time.monotonic() - started
+            out_tok = (data.get("usage") or {}).get("completion_tokens", 0)
+            raise LLMError("response truncated at max_tokens (local: %.0fs, %s output tokens)"
+                           % (elapsed, out_tok))
         content = _THINK_RE.sub("", content, count=1)
         try:
             parsed = json.loads(content)

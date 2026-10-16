@@ -1,0 +1,104 @@
+{
+  "db": "/tmp/claude-1000/-home-etl-projects-pipez/da67daff-717b-431c-aaf0-b7dcbbb0d8fb/scratchpad/bench/vm.sqlite3",
+  "tiers": [
+    "local",
+    "light",
+    "standard"
+  ],
+  "stages": [
+    "brief"
+  ],
+  "estimated_spend": 0.0561267,
+  "results": [
+    {
+      "run_id": "60cd5166f16a",
+      "stage": "brief",
+      "tier": "local",
+      "model": "qwen3.6",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 308.8,
+      "input_tokens": 819,
+      "output_tokens": 2503,
+      "cost": 0.0,
+      "length_ratio": 1.4848116646415552,
+      "headings_present": 1,
+      "headings_stored": 1
+    },
+    {
+      "run_id": "60cd5166f16a",
+      "stage": "brief",
+      "tier": "light",
+      "model": "claude-haiku-5-5",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 12.5,
+      "input_tokens": 6608,
+      "output_tokens": 2271,
+      "cost": 0.0017963000000000002,
+      "length_ratio": 0.8484638083666031,
+      "headings_present": 1,
+      "headings_stored": 1
+    },
+    {
+      "run_id": "60cd5166f16a",
+      "stage": "brief",
+      "tier": "standard",
+      "model": "claude-sonnet-5-5",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 15.83,
+      "input_tokens": 6608,
+      "output_tokens": 2105,
+      "cost": 0.034266,
+      "length_ratio": 0.9562575941676792,
+      "headings_present": 1,
+      "headings_stored": 1
+    },
+    {
+      "run_id": "c6973d74ac0e",
+      "stage": "brief",
+      "tier": "local",
+      "model": "qwen3.6",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 119.37,
+      "input_tokens": 802,
+      "output_tokens": 2478,
+      "cost": 0.0,
+      "length_ratio": 1.7103106537068802,
+      "headings_present": 1,
+      "headings_stored": 1
+    },
+    {
+      "run_id": "c6973d74ac0e",
+      "stage": "brief",
+      "tier": "light",
+      "model": "claude-haiku-5-5",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 7.08,
+      "input_tokens": 6582,
+      "output_tokens": 1028,
+      "cost": 0.0011722,
+      "length_ratio": 0.5645130550790928,
+      "headings_present": 1,
+      "headings_stored": 1
+    },
+    {
+      "run_id": "c6973d74ac0e",
+      "stage": "brief",
+      "tier": "standard",
+      "model": "claude-sonnet-5-5",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 16.67,
+      "input_tokens": 6582,
+      "output_tokens": 1879,
+      "cost": 0.031954,
+      "length_ratio": 0.9775109586430342,
+      "headings_present": 1,
+      "headings_stored": 1
+    }
+  ]
+}

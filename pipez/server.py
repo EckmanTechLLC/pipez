@@ -23,17 +23,28 @@ logging.basicConfig(level=logging.INFO,
 UI_DIR = os.path.join(os.path.dirname(__file__), "..", "ui")
 
 app = FastAPI(title="PIPEZ")
-db = Database(config.DB_PATH)
-seed_prompts.seed(db)
-prefs = PreferenceStore(db)
+# Built at startup, never at import: importing this module must not touch the
+# filesystem (tests and tooling import it). Tests may preset db/prefs/engine.
+db: Database | None = None
+prefs: PreferenceStore | None = None
 bus = EventBus()
 engine: Engine | None = None
 
 
 @app.on_event("startup")
 async def startup():
-    global engine
+    global db, prefs, engine
+    if db is None:
+        db = Database(config.DB_PATH)
+    seed_prompts.seed(db)
+    if prefs is None:
+        prefs = PreferenceStore(db)
     engine = Engine(db, bus, make_llm(), prefs)
+    await engine.recover()      # interrupted runs -> failed (never auto-resumed)
+    try:
+        await engine.sweep()
+    except Exception:
+        logging.getLogger(__name__).exception("startup orphan sweep failed")
 
 
 class SubmitRequest(BaseModel):
@@ -120,6 +131,21 @@ async def run_detail(run_id: str):
     return run
 
 
+@app.get("/api/runs/{run_id}/spend")
+async def run_spend(run_id: str):
+    if not db.get_run(run_id):
+        raise HTTPException(404, "no such run")
+    return db.get_spend(run_id)
+
+
+@app.get("/api/projects/{project_id}/spend")
+async def project_spend(project_id: str):
+    rows = db._query("SELECT id FROM runs WHERE project_id=?", (project_id,))
+    if not rows:
+        raise HTTPException(404, "no such project")
+    return db.get_spend([r["id"] for r in rows])
+
+
 def _intake_view(run: dict) -> dict:
     return {"status": run["status"], "decisions": run.get("decisions"),
             "answers": run.get("answers"), "brief": run.get("brief")}
@@ -204,6 +230,11 @@ async def undeploy_run(run_id: str):
 @app.get("/api/sandboxes")
 async def sandboxes():
     return db.list_sandboxes()
+
+
+@app.post("/api/sandboxes/sweep")
+async def sweep_sandboxes():
+    return await engine.sweep()
 
 
 @app.post("/api/sandboxes/{run_id}/destroy")
