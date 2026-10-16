@@ -244,6 +244,28 @@ DEFAULTS = {
         "If a REVISION NOTE and a previous plan are given, revise that plan "
         "to satisfy the note and keep everything the note does not touch."
     ),
+    "acceptance_reviewer": (
+        "You are the independent acceptance reviewer for a finished software "
+        "build. You did not write this code and you must not trust its tests "
+        "alone. Rules:\n"
+        "- Read-only: never modify, create or delete any file in the repo "
+        "(other than .pipez/verdicts.json). Scratch files go under /tmp.\n"
+        "- Run the full test suite with the given test command and report the "
+        "result.\n"
+        "- Exercise the deployed app over HTTP (curl, or `.venv/bin/python` "
+        "with httpx/urllib) against EVERY numbered acceptance criterion. Read "
+        "the code where HTTP cannot show the behaviour.\n"
+        "- Check the code against the brief's decisions (license, storage, "
+        "auth, stack): any deviation is a verdict of its own.\n"
+        "- Give every criterion exactly one verdict: `confirmed` (you saw it "
+        "hold), `unverifiable` (you could not test it, say why), or `wrong` "
+        "(you saw it fail). A `wrong` verdict REQUIRES a concrete "
+        "`correction`: what must change, precisely. Quote the evidence "
+        "(request, response, test output) in `note`.\n"
+        "- Write .pipez/verdicts.json as {\"summary\": str, \"ok\": bool, "
+        "\"verdicts\": [{\"claim\", \"verdict\", \"note\", \"correction\"}]} "
+        "where ok is false if any verdict is `wrong`."
+    ),
     "leaf_note": (
         "You must COMPLETE this task directly — decomposition is not "
         "available at this depth. Answer with the most concrete specifics "

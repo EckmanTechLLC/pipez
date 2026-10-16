@@ -7,7 +7,13 @@ The engine uploads the right one to `<workdir>/runner.py`.
 
 ## CLI
     runner.py --cwd <worktree> --task-file .pipez/task.md --model <id>
-              --max-turns N --max-budget-usd X --log <file.jsonl> [--test-command <cmd>]
+              --max-turns N --max-budget-usd X --log <file.jsonl> [--test-command <cmd>] [--review]
+
+The engine keeps per-leaf settings off argv (an agent's broad `pkill -f pytest` would
+otherwise match the runner itself): it writes `<worktree>/.pipez/runner.json`
+`{"test_command": str|null, "review": bool}`, which the runner reads. `--test-command` and
+`--review` remain as overrides for manual use. pytest exit 5 (no tests collected) reports
+`passed 0, failed 0, note "no tests collected"`.
 
 `ANTHROPIC_API_KEY` is read from the environment (the engine sources `<workdir>/.env`; it is
 never on a command line). The log gets one JSON line per SDK message (key redacted).
@@ -42,6 +48,16 @@ re-run with a "# Previous attempt failed" section.
      "tests": {"command": str, "passed": int, "failed": int}}
 
 `source` for code facts is a path or a test name.
+
+## Review mode (`--review`)
+Used by the engine's acceptance reviewer. The agent writes `.pipez/verdicts.json`
+`{"summary": str, "ok": bool, "verdicts": [{claim, verdict: confirmed|unverifiable|wrong, note,
+correction}]}` instead of `result.json`. The runner requires no commit, runs no tests (the reviewer
+runs them itself), and sets `ok=false, error="reviewer modified the worktree: ..."` when
+`git status --porcelain` shows tracked changes or new files outside `.pipez/` (ignored build
+artefacts do not count). The stdout JSON gains `verdicts` (the parsed file, or `null`);
+`commit` is `null`, `files_changed` empty, `tests` `null`. The mock emits two confirmed verdicts,
+or one `wrong` when the task file contains `MOCK_WRONG`.
 
 ## Mock runner env
 - `PIPEZ_MOCK_RUNNER_FAIL=<plan task id>`: that task reports `tests.failed=1`.

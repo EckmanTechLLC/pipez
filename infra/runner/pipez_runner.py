@@ -22,7 +22,15 @@ SYSTEM_APPEND = (
     "You are a coding agent in a disposable VM, working on exactly one task in a "
     "git worktree. The task file's brief and module contract are binding. Work "
     "only inside the current directory. Commit all work on the current branch "
-    "and finish by writing .pipez/result.json as the task file describes."
+    "and finish by writing .pipez/result.json as the task file describes. "
+    "Never use `pkill`/`killall` with a pattern - kill by PID (`$!`, `pgrep -f <unique "
+    "marker>`) or run tests with `timeout`. Broad kills terminate your own session."
+)
+REVIEW_APPEND = (
+    "You are an independent acceptance reviewer in a disposable VM, in a read-only "
+    "git worktree of the finished project. Do NOT modify, create or delete any "
+    "project file. Run the tests, exercise the deployed app, and finish by writing "
+    ".pipez/verdicts.json as the task file describes."
 )
 TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
 IGNORED = ("__pycache__/", ".pyc", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
@@ -108,6 +116,25 @@ def read_result(cwd):
         return None
 
 
+def read_verdicts(cwd):
+    """Review mode: .pipez/verdicts.json as a dict, or None."""
+    path = os.path.join(cwd, ".pipez", "verdicts.json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def review_dirty(cwd):
+    """Paths a read-only reviewer left behind: tracked changes or new files outside
+    .pipez/ (build artefacts and git-ignored paths do not count)."""
+    _, st = sh("git status --porcelain", cwd)
+    paths = [l[3:].split(" -> ")[-1] for l in st.splitlines() if len(l) > 3]
+    return filter_paths(paths, cwd)
+
+
 def read_question(cwd):
     """The agent's alternative to result.json: .pipez/question.json, or None."""
     path = os.path.join(cwd, ".pipez", "question.json")
@@ -167,10 +194,14 @@ def run_tests(cwd, claimed, project_command=None):
         passed, failed = parsed
         if rc != 0 and failed == 0:
             failed = 1
+    elif rc == 5:       # pytest: no tests collected - not a failure
+        passed, failed = 0, 0
     else:
         passed, failed = (0, 1) if rc else (1, 0)
     res = {"command": cmd, "rc": rc, "passed": passed, "failed": failed,
            "tail": redact(out[-2000:])}
+    if rc == 5 and not parsed:
+        res["note"] = "no tests collected"
     if project:
         res["claimed"] = claim_cmd or None
     return res
@@ -186,7 +217,8 @@ async def run_session(args, prompt, log):
         max_budget_usd=args.max_budget_usd,
         permission_mode="bypassPermissions",   # the VM is disposable
         allowed_tools=TOOLS,
-        system_prompt={"type": "preset", "preset": "claude_code", "append": SYSTEM_APPEND},
+        system_prompt={"type": "preset", "preset": "claude_code",
+                       "append": REVIEW_APPEND if args.review else SYSTEM_APPEND},
         setting_sources=[],                     # ignore any user/project settings
     )
     final, last_text = None, ""
@@ -203,6 +235,45 @@ async def run_session(args, prompt, log):
     return final, last_text
 
 
+def review_main(args, out, final, error, is_error, t0):
+    """Review mode: the agent writes .pipez/verdicts.json instead of result.json;
+    no commit is required, no tests are run, and the worktree must stay clean."""
+    usage = (getattr(final, "usage", None) or {}) if final else {}
+    data = read_verdicts(args.cwd)
+    offenders = review_dirty(args.cwd)
+    verdicts = data if data is not None and isinstance(data.get("verdicts"), list) else None
+    if offenders:
+        error = "reviewer modified the worktree: %s" % ", ".join(offenders[:10])
+    elif verdicts is None and not error:
+        error = "no verdicts.json"
+    ok = verdicts is not None and not offenders and not is_error
+    out.write(json.dumps({
+        "ok": ok,
+        "summary": str((data or {}).get("summary") or ""),
+        "output": "", "facts": [], "files_changed": [], "commit": None, "tests": None,
+        "verdicts": verdicts,
+        "cost_usd": float(getattr(final, "total_cost_usd", None) or 0.0),
+        "num_turns": int(getattr(final, "num_turns", 0) or 0),
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "is_error": is_error,
+        "error": error,
+        "needs_human": None,
+        "seconds": round(time.time() - t0, 1),
+    }) + "\n")
+    out.flush()
+
+
+def read_settings(cwd):
+    """Per-leaf settings the engine writes to .pipez/runner.json (keeps them off argv)."""
+    try:
+        with open(os.path.join(cwd, ".pipez", "runner.json")) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cwd", required=True)
@@ -212,8 +283,13 @@ def main():
     ap.add_argument("--max-budget-usd", type=float, default=5.0)
     ap.add_argument("--log", required=True)
     ap.add_argument("--test-command", default=None)
+    ap.add_argument("--review", action="store_true")
     args = ap.parse_args()
     args.cwd = os.path.abspath(args.cwd)
+    settings = read_settings(args.cwd)
+    if args.test_command is None and settings.get("test_command"):
+        args.test_command = str(settings["test_command"])
+    args.review = args.review or bool(settings.get("review"))
 
     out = sys.stdout
     sys.stdout = sys.stderr      # nothing but the final JSON may reach stdout
@@ -239,6 +315,9 @@ def main():
     elif error is None and is_error:
         error = redact("%s: %s" % (getattr(final, "subtype", "error"),
                                    getattr(final, "result", None) or last_text or ""))
+    if args.review:
+        review_main(args, out, final, error, is_error, t0)
+        return
     res = read_result(args.cwd) or {}
     question = None if res else read_question(args.cwd)
     tests = run_tests(args.cwd, res.get("tests"), args.test_command)   # before the dirty check

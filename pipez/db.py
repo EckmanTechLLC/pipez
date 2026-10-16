@@ -142,6 +142,8 @@ MIGRATIONS = [
         error        TEXT,
         log          TEXT
     )""",
+    "ALTER TABLE runs ADD COLUMN verification TEXT",
+    "ALTER TABLE verifications ADD COLUMN round INTEGER",
     """CREATE TABLE IF NOT EXISTS preferences (
         key        TEXT PRIMARY KEY,
         status     TEXT NOT NULL,
@@ -375,16 +377,20 @@ class Database:
     def clear_verifications(self, run_id):
         self._exec("DELETE FROM verifications WHERE run_id=?", (run_id,))
 
-    def add_verification(self, run_id, task_id, verdicts, summary):
+    def add_verification(self, run_id, task_id, verdicts, summary, round=1):
         self._exec(
-            "INSERT INTO verifications (run_id, task_id, verdicts, summary, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (run_id, task_id, json.dumps(verdicts), summary, time.time()),
+            "INSERT INTO verifications (run_id, task_id, verdicts, summary, created_at, round) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (run_id, task_id, json.dumps(verdicts), summary, time.time(), round),
         )
 
     def get_verifications(self, run_id):
         return self._query(
             "SELECT * FROM verifications WHERE run_id=? ORDER BY id", (run_id,))
+
+    def set_run_verification(self, run_id, verification):
+        """passed | failed | skipped | error (None clears it)."""
+        self._exec("UPDATE runs SET verification=? WHERE id=?", (verification, run_id))
 
     def finish_run(self, run_id, status, result=None, error=None):
         self._exec(

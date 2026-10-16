@@ -267,6 +267,12 @@ async def run_verifications(run_id: str):
 @app.post("/api/runs/{run_id}/verify")
 async def verify(run_id: str):
     run = db.get_run(run_id)
+    if run and run.get("plan"):         # acceptance review of the live deployment
+        try:
+            engine.reverify(run_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"started": True}
     if not run or run["status"] != "done" or not run["result"]:
         raise HTTPException(400, "run has no finished result to verify")
     asyncio.get_running_loop().create_task(engine.verify(run_id))

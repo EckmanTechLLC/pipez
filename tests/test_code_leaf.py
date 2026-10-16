@@ -145,12 +145,23 @@ async def test_failing_tests_skip_dependents(env, monkeypatch):
 async def test_merge_conflict(env, monkeypatch):
     db, engine, llm, _ = env
     monkeypatch.setenv("PIPEZ_MOCK_RUNNER_CONFLICT", "1")
+    orig, n = engine._merge_leaf, [0]
+
+    async def racing(task, sb, repo, branch, direct, out):
+        # a sibling lands a conflicting CONFLICT.md on integration just before every
+        # merge, so the conflict retry conflicts again (and the leaf then fails)
+        n[0] += 1
+        await sb.run("echo sibling%d > CONFLICT.md && git add CONFLICT.md && git -c "
+                     "user.name=x -c user.email=x@x commit -q -m sibling" % n[0], cwd=repo)
+        return await orig(task, sb, repo, branch, direct, out)
+    monkeypatch.setattr(engine, "_merge_leaf", racing)
     rid, run = await run_plan(db, engine)
     ts = by_plan_id(db, rid)
     failed = [t for t in ts.values() if t["status"] == "failed"]
     assert failed and all("merge_conflict" in t["error"] and "CONFLICT.md" in t["error"]
                           for t in failed)
-    assert any(t["status"] == "done" for t in ts.values())
+    assert all(sum(1 for e in db.get_log(t["id"]) if e["event"] == "worktree") == 2
+               for t in failed)        # one conflict retry, then the same failure as before
     assert any(e["event"] == "merge_conflict" for t in failed for e in db.get_log(t["id"]))
     wd = db.get_sandbox(rid)["name"]
     assert git(wd, "status", "--porcelain") == ""
@@ -224,7 +235,8 @@ async def test_engine_passes_project_command_and_records_claim(env):
     db, engine, llm, _ = env
     rid, run = await run_plan(db, engine)
     assert run["status"] == "done", run["error"]
-    assert any("--test-command" in l and "pytest" in l for l in RecSandbox.lines)
+    runner_lines = [l for l in RecSandbox.lines if "runner.py" in l]
+    assert runner_lines and not any("--test-command" in l or "pytest" in l for l in runner_lines)
     tests = json.loads(by_plan_id(db, rid)["t1"]["result"])["metadata"]["tests"]
     assert tests["command"] == "python3 -m pytest -q" and tests["claimed"]
     wd = db.get_sandbox(rid)["name"]

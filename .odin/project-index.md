@@ -132,3 +132,8 @@ pytest suite (`requirements-dev.txt`: pytest, pytest-asyncio). `test_providers.p
 - db.py: `deployments` table, `upsert_deployment/get_deployment/list_deployments/replace_deployment`. server.py: GET /api/runs/{id}/deployment, GET /api/deployments, POST /api/runs/{id}/deploy, POST /api/runs/{id}/undeploy; SSE `deployment` + snapshot. ui: `deployBadge`, plan-panel deploy block.
 - tests/test_deploy.py; conftest sets `DEPLOY_AUTO=False` (deploy tests opt in).
 
+
+## Acceptance review (task 13a)
+- engine.py: planned-run order is run -> `_deploy(review=True)` -> `_review` -> `_finish_review` (run `done`, sandbox destroyed unless build/review failed). `_review` (reviewer leaf, role `REVIEW_ROLE`, tier `VERIFY_TIER`, detached worktree at `integration`, runner `--review`), `_review_md`, `reverify`/`_reverify`, `_review_skipped`, `_build_tasks`; reviewer rows are ignored by `resume`/`_resume_task`. `stop()` handles `verifying` for plan runs.
+- infra/runner: `--review` mode (`.pipez/verdicts.json`, dirty-tree refusal, `verdicts` in stdout); mock emits 2 confirmed or 1 wrong (`MOCK_WRONG`).
+- db.py `runs.verification`, `set_run_verification`; config `VERIFY_AUTO/VERIFY_TIER`; seed prompt `acceptance_reviewer`; POST /api/runs/{id}/verify re-runs the review on plan runs; ui badge `reviewBadge`. tests/test_review.py.

@@ -5,6 +5,7 @@ complete. Children run in parallel under a global concurrency cap; the parent
 synthesizes over whatever succeeded. Every transition is persisted to SQLite
 first, then published to the event bus for the live table.
 """
+import ast
 import asyncio
 import json
 import logging
@@ -49,6 +50,7 @@ TERMINAL = ("done", "failed", "cancelled")
 # Task statuses a stop turns into `cancelled`.
 ACTIVE_TASK = ("running", "pending", "awaiting_children", "synthesizing",
                "awaiting_human")
+REVIEW_ROLE = "acceptance-reviewer"    # task 13a: the read-only acceptance reviewer leaf
 MAX_TASK_QUESTIONS = 3     # per code task, before it fails instead of asking again
 
 BASELINE_GITIGNORE = ("__pycache__/\n*.pyc\n.pytest_cache/\n.mypy_cache/\n"
@@ -57,6 +59,9 @@ BASELINE_GITIGNORE = ("__pycache__/\n*.pyc\n.pytest_cache/\n.mypy_cache/\n"
 
 def k_empty(v) -> bool:
     return v is None or (isinstance(v, str) and not v.strip())
+
+
+BASH_REPR = re.compile(r"name='Bash', input=\{'command': ('(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\")")
 
 
 class Engine:
@@ -732,6 +737,7 @@ class Engine:
             self._publish_intake(run_id)
             self._spawn(self._intake(run_id), run_id)
             return 0
+        tasks = [t for t in tasks if t["role"] != REVIEW_ROLE]
         has_failures = any(t["status"] != "done" for t in tasks)
         if (run["status"] not in ("failed", "running", "cancelled")
                 and not has_failures):
@@ -773,7 +779,7 @@ class Engine:
             raise ValueError("no such run")
         if run["status"] in TERMINAL:
             raise ValueError("run is %s, nothing to stop" % run["status"])
-        if run["status"] == "verifying":
+        if run["status"] == "verifying" and not run.get("plan"):
             raise ValueError("run is verifying, not stoppable")
         t = self._run_tasks.get(run_id)
         if t is not None and not t.done():
@@ -925,10 +931,12 @@ class Engine:
             self.db.set_run_status(run_id, "done")
         self._publish_run(run_id)
 
-    async def _deploy(self, run_id: str):
+    async def _deploy(self, run_id: str, review: bool = False):
         """Clone a fresh VM, install the run's tarball, start it as a service,
         wait for the health check. Failures never fail the run: the deployment
-        becomes `failed` and the VM is kept for inspection."""
+        becomes `failed` and the VM is kept for inspection. review: the caller
+        runs the acceptance review next, so a ready deployment hands the run
+        over as `verifying` instead of flickering through `done`."""
         key = "run:" + run_id
         lines: list = []
         sb = None
@@ -979,7 +987,10 @@ class Engine:
                 logger.exception("recording deploy failure of run %s failed", run_id)
         finally:
             if self.db.get_run(run_id)["status"] == "deploying":
-                self.db.set_run_status(run_id, "done")
+                dep = self.db.get_deployment(run_id)
+                nxt = ("verifying" if review and config.VERIFY_AUTO and dep
+                       and dep["status"] == "ready" else "done")
+                self.db.set_run_status(run_id, nxt)
             self._publish_run(run_id)
             self._publish_deployment(run_id)
 
@@ -1095,6 +1106,7 @@ class Engine:
             self._publish_run(run_id)
             return
         self.db.set_run_status(run_id, "running", clear_error=True)
+        self.db.set_run_verification(run_id, None)
         self._publish_run(run_id)
         try:
             await self._init_workspace(run_id)
@@ -1106,14 +1118,217 @@ class Engine:
             await self._release_sandbox(run_id, keep=config.SANDBOX_KEEP_ON_FAILURE)
             return
         await self._run_resume(run_id, root)
-        # A run that finished with failed/skipped tasks keeps its sandbox so
-        # resume continues on the same repo (done tasks' code is in it).
-        ok = (self.db.get_run(run_id)["status"] in ("done", "deploying")
-              and all(t["status"] == "done" for t in self.db.get_tasks(run_id)))
+        # Order: deploy -> acceptance review (needs the live sandbox) -> release.
+        if self.db.get_run(run_id)["status"] == "deploying":
+            await self._deploy(run_id, review=True)
+        if (self.db.get_run(run_id)["status"] in ("done", "verifying")
+                and self._build_done(run_id)):
+            if config.VERIFY_AUTO:
+                await self._review_with_fixes(run_id, root)
+            else:
+                self._review_skipped(run_id, "PIPEZ_VERIFY_AUTO is off")
+        await self._finish_review(run_id)
+
+    def _build_tasks(self, run_id: str) -> list:
+        return [t for t in self.db.get_tasks(run_id) if t["role"] != REVIEW_ROLE]
+
+    def _build_done(self, run_id: str) -> bool:
+        return all(t["status"] == "done" for t in self._build_tasks(run_id))
+
+    async def _finish_review(self, run_id: str):
+        """The run ends `done` (flagged by `verification`); then release the
+        sandbox. A run that finished with failed/skipped tasks, or whose review
+        failed or errored, keeps its sandbox (resume / inspection)."""
+        run = self.db.get_run(run_id)
+        if run["status"] == "verifying":
+            self.db.set_run_status(run_id, "done")
+            self._publish_run(run_id)
+        run = self.db.get_run(run_id)
+        ok = (run["status"] == "done" and self._build_done(run_id)
+              and run.get("verification") not in ("failed", "error"))
         await self._release_sandbox(
             run_id, keep=(not ok) and config.SANDBOX_KEEP_ON_FAILURE)
-        if self.db.get_run(run_id)["status"] == "deploying":
-            await self._deploy(run_id)
+
+    # -- acceptance review (task 13a) ------------------------------------------
+
+    def _review_skipped(self, run_id: str, why: str) -> str:
+        self.db.log("run:" + run_id, "review_skipped", {"reason": why})
+        self.db.set_run_verification(run_id, "skipped")
+        self._publish_run(run_id)
+        return "skipped"
+
+    def _publish_verifications(self, run_id: str):
+        self.bus.publish({"type": "verification", "run_id": run_id,
+                          "verifications": self.db.get_verifications(run_id)})
+
+    async def _review_with_fixes(self, run_id: str, root: dict = None) -> str:
+        """_review; while it returns `failed` and rounds remain
+        (PIPEZ_VERIFY_ROUNDS): fixer leaf on `integration` with the wrong
+        verdicts as its brief, re-integrate, fresh deploy VM, review again.
+        Any problem in the fix path stops the loop; verification stays `failed`."""
+        key = "run:" + run_id
+        if root is None:
+            root = next(t for t in self.db.get_tasks(run_id) if not t["parent_id"])
+        self.db.clear_verifications(run_id)
+        rnd = 1
+        while True:
+            verification = await self._review(run_id, root, rnd)
+            self.db.log(key, "review_round", {"round": rnd, "verification": verification})
+            if verification != "failed" or rnd > config.VERIFY_ROUNDS:
+                return verification
+            vs = self.db.get_verifications(run_id)
+            wrong = [v for v in json.loads(vs[-1]["verdicts"]) if v["verdict"] == "wrong"]
+            kids = self.db.get_children(root["id"])
+            n = sum(1 for c in kids if c.get("title", "").startswith("Fix review findings")) + 1
+            run = self.db.get_run(run_id)
+            lines = ["%d. Claim: %s\n   Problem: %s\n   Correction: %s" % (
+                i, w["claim"], w["note"] or "-", w["correction"] or "-")
+                for i, w in enumerate(wrong, 1)]
+            prompt = ((("Relevant decisions (build brief):\n%s\n\n" % run["brief"])
+                       if run.get("brief") else "")
+                      + "An independent acceptance review of the deployed application "
+                        "found these claims to be WRONG:\n\n%s\n\n"
+                        "Make the full build and tests pass; change as little as possible; "
+                        "keep public contracts." % "\n".join(lines))
+            fix = self.db.create_task(
+                run_id=run_id, parent_id=root["id"], depth=1,
+                seq=max([c["seq"] for c in kids] or [-1]) + 1,
+                role="integrator-engineer", title="Fix review findings (round %d)" % n,
+                prompt=prompt, tier="deep", kind="code", module="*",
+                acceptance=["The build and test commands pass on integration"])
+            self._publish_task(fix)
+            self.db.log(key, "review_fix", {"round": rnd, "task_id": fix["id"],
+                                            "wrong": len(wrong)})
+            try:
+                await self._execute(fix)
+                try:
+                    await self._integrate(run_id, root)
+                except IntegrationError as e:
+                    if not e.fixable:
+                        raise
+                    await self._integrate_with_fixes(run_id, root)
+                old = self.db.get_deployment(run_id)
+                if old and old["status"] in ("ready", "failed"):
+                    await self.undeploy(run_id)
+                self.db.log(key, "review_redeploy", {
+                    "round": rnd, "vmid": old["vmid"] if old else None})
+                await self._deploy(run_id, review=True)
+                dep = self.db.get_deployment(run_id)
+                if not dep or dep["status"] != "ready":
+                    self.db.log(key, "review_fix_stopped", {
+                        "round": rnd, "reason": "redeploy is %s" % (
+                            dep["status"] if dep else "absent")})
+                    self.db.set_run_status(run_id, "verifying")
+                    self._publish_run(run_id)
+                    return "failed"
+            except Exception as e:      # CancelledError is not an Exception
+                logger.exception("review fix round %d of run %s failed", rnd, run_id)
+                self.db.log(key, "review_fix_stopped", {"round": rnd, "reason": str(e)})
+                return "failed"
+            rnd += 1
+
+    async def _review(self, run_id: str, root: dict = None, rnd: int = 1) -> str:
+        """Independent read-only reviewer leaf over the live deployment. Stores
+        its verdicts as a `verifications` row and sets runs.verification:
+        passed (no `wrong`), failed (any `wrong`), error (runner failed / no
+        verdicts), skipped (no plan / deployment not ready / no sandbox)."""
+        key = "run:" + run_id
+        run = self.db.get_run(run_id)
+        plan = run.get("plan")
+        dep = self.db.get_deployment(run_id)
+        if not plan:
+            return self._review_skipped(run_id, "run has no plan")
+        if not dep or dep["status"] != "ready":
+            return self._review_skipped(
+                run_id, "deployment is %s" % (dep["status"] if dep else "absent"))
+        if self._sandboxes.get(run_id) is None:
+            return self._review_skipped(run_id, "no build sandbox")
+        if root is None:
+            root = next(t for t in self.db.get_tasks(run_id) if not t["parent_id"])
+        self.db.set_run_verification(run_id, None)
+        self.db.set_run_status(run_id, "verifying")
+        self._publish_run(run_id)
+        kids = self.db.get_children(root["id"])
+        task = self.db.create_task(
+            run_id=run_id, parent_id=root["id"], depth=1,
+            seq=max([c["seq"] for c in kids] or [-1]) + 1, role=REVIEW_ROLE,
+            title="Acceptance review", prompt=self.db.get_prompt("acceptance_reviewer") or "",
+            tier=config.VERIFY_TIER, kind="code", module="*", acceptance=[])
+        self._publish_task(task)
+        self.db.log(key, "review_start", {"task_id": task["id"], "url": dep["url"]})
+        verification, summary, verdicts = "error", "", []
+        try:
+            result = await self._execute(task)
+            data = result.get("verdicts") or []
+            summary = result.get("summary") or ""
+            verdicts = [{"claim": str(v.get("claim") or ""),
+                         "verdict": (v.get("verdict") if v.get("verdict") in (
+                             "confirmed", "unverifiable", "wrong") else "unverifiable"),
+                         "note": str(v.get("note") or ""),
+                         "correction": str(v.get("correction") or "")}
+                        for v in data if isinstance(v, dict)]
+            if not verdicts:
+                raise LLMError("reviewer produced no verdicts")
+            verification = ("failed" if any(v["verdict"] == "wrong" for v in verdicts)
+                            else "passed")
+        except Exception as e:      # CancelledError is not an Exception
+            logger.exception("acceptance review of run %s failed", run_id)
+            summary = "review failed: %s" % e
+            self.db.log(key, "review_failed", {"error": str(e)})
+        self.db.add_verification(run_id, root["id"], verdicts, summary, rnd)
+        self.db.set_run_verification(run_id, verification)
+        self.db.log(key, "review_done", {"verification": verification,
+                                         "verdicts": len(verdicts)})
+        self._publish_verifications(run_id)
+        self._publish_run(run_id)
+        return verification
+
+    def reverify(self, run_id: str) -> dict:
+        """Re-run the acceptance review of a done plan run whose build sandbox
+        is still around. ValueError (-> 400) names the reason otherwise."""
+        run = self.db.get_run(run_id)
+        if not run:
+            raise ValueError("no such run")
+        if not run.get("plan"):
+            raise ValueError("run has no plan")
+        if run["status"] != "done":
+            raise ValueError("run is %s, only a done run can be re-verified" % run["status"])
+        row = self.db.get_sandbox(run_id)
+        if not row or row["status"] not in ("kept", "ready"):
+            raise ValueError("the build sandbox is %s: nothing to review in"
+                             % (row["status"] if row else "absent"))
+        dep = self.db.get_deployment(run_id)
+        if not dep or dep["status"] != "ready":
+            raise ValueError("deployment is %s, it must be ready"
+                             % (dep["status"] if dep else "absent"))
+        if self._alive(run_id):
+            raise ValueError("run is busy")
+        self.db.set_run_status(run_id, "verifying")
+        self._publish_run(run_id)
+        self._spawn(self._reverify(run_id, row), run_id)
+        return self.db.get_run(run_id)
+
+    async def _reverify(self, run_id: str, row: dict):
+        try:
+            sb = self._sandboxes.get(run_id)
+            if sb is None:
+                sb = self._sandbox_factory(run_id)
+                sb.adopt(row)
+                self._sandboxes[run_id] = sb
+            if not await sb.alive():
+                self._review_skipped(run_id, "build sandbox is gone")
+            else:
+                await self._review_with_fixes(run_id)
+            await self._finish_review(run_id)
+        except asyncio.CancelledError:
+            self._mark_cancelled(run_id)
+            await self._release_sandbox(run_id, keep=True)
+            raise
+        except Exception as e:
+            logger.exception("re-verification of run %s failed", run_id)
+            self.db.set_run_verification(run_id, "error")
+            self.db.log("run:" + run_id, "review_failed", {"error": str(e)})
+            await self._finish_review(run_id)
 
     async def _run_resume(self, run_id: str, root: dict):
         try:
@@ -1136,7 +1351,8 @@ class Engine:
         below this node, so ancestors must re-synthesize. force: a sibling
         dependency was redone, so redo this node even if it was done."""
         task = self.db.get_task(task["id"])
-        children = self.db.get_children(task["id"])
+        children = [c for c in self.db.get_children(task["id"])
+                    if c["role"] != REVIEW_ROLE]
         if not children:
             if task["status"] == "done" and task["result"] and not force:
                 return json.loads(task["result"]), False
@@ -1493,6 +1709,125 @@ Module path: {mpath}
         "Fix the cause (tail of the failure below), then finish the task as "
         "described above.\n```\n%s\n```\n" % failure[-2000:] if failure else "")
 
+    def _review_md(self, task: dict, run: dict, failure: str = None) -> str:
+        plan = run["plan"]
+        dep = self.db.get_deployment(run["id"]) or {}
+        spec = plan.get("deploy") or {}
+        n, crit = 0, []
+        for pt in plan.get("tasks") or []:
+            for a in pt.get("acceptance") or []:
+                n += 1
+                crit.append("%d. [%s] %s" % (n, pt.get("title") or pt.get("id") or "", a))
+        return """# Task: Acceptance review
+
+Task id: {tid}
+
+## Brief (binding)
+{brief}
+
+## Architecture
+{arch}
+
+## Acceptance criteria (every one needs a verdict; the claim is the criterion)
+{crit}
+
+## Deployed app
+- URL: {url}
+- Health path: `{health}`
+
+## Environment
+- Test command: `{test_cmd}`
+- This worktree is a detached checkout of the finished `integration` branch; the repo's
+  virtualenv is at `./.venv` (use `.venv/bin/python`, never system `python3`).
+- The deployed app is reachable from this machine at the URL above.
+
+## Rules
+{rules}
+
+## Output
+Write `.pipez/verdicts.json` (not committed) as JSON, instead of result.json:
+  {{"summary": str, "ok": bool, "verdicts": [{{"claim": str (the criterion, verbatim, or
+   "brief: <decision>"), "verdict": "confirmed"|"unverifiable"|"wrong", "note": str,
+   "correction": str (required, concrete, when wrong; otherwise "")}}]}}
+Do not modify any other file in the worktree.
+""".format(tid=task["id"], brief=run.get("brief") or "", arch=plan.get("architecture", ""),
+           crit="\n".join(crit) or "(the plan lists no acceptance criteria)",
+           url=dep.get("url") or "(none)", health=spec.get("health_path") or "/",
+           test_cmd=plan.get("test_command") or "(none given)",
+           rules=task.get("prompt") or "") + (
+        "\n# Previous attempt failed\n```\n%s\n```\n" % failure[-2000:] if failure else "")
+
+    async def _merge_leaf(self, task: dict, sb, repo: str, branch: str, direct: bool,
+                          out: dict):
+        """Merge a finished leaf into `integration` (caller holds the merge lock).
+        None on success; on a content conflict the merge is aborted and
+        {"error", "note"} returned so the caller can retry on the new integration."""
+        if direct:
+            r = await sb.git(["merge", "--ff-only", out["commit"]], cwd=repo)
+            if r["rc"]:
+                raise LLMError("fix_merge_failed: %s" % self._tail(r["stderr"] or r["stdout"], 400))
+            return None
+        r = await sb.git(["merge", "--no-ff", branch, "-m",
+                          "merge %s: %s" % (task["id"], task["title"])], cwd=repo)
+        if not r["rc"]:
+            return None
+        u = await sb.git(["diff", "--name-only", "--diff-filter=U"], cwd=repo)
+        files = [f for f in u["stdout"].splitlines() if f.strip()]
+        await sb.git(["merge", "--abort"], cwd=repo)
+        self.db.log(task["id"], "merge_conflict", {"files": files, "branch": branch})
+        listed = ", ".join(files) or self._tail(r["stderr"])
+        return {"error": "merge_conflict: %s" % listed,
+                "note": "Your previous attempt conflicted with work merged by a sibling "
+                        "task on: %s. The worktree now contains the merged versions - "
+                        "re-apply your changes on top of them, do not overwrite unrelated "
+                        "content." % listed}
+
+    async def _diagnose_lost_runner(self, sb, log_path: str, rc) -> str:
+        """Error text for a runner that produced no result: the last Bash commands
+        from the tail of its log, and a hint when one was a broad kill."""
+        why = "runner produced no result (rc=%s)" % rc
+        try:
+            tail = (await sb.get(log_path))[-3072:].decode(errors="replace")
+        except Exception:  # noqa: BLE001 - diagnosis is best effort
+            return why
+        cmds = self._bash_commands(tail)[-3:]
+        if not cmds:
+            return why
+        why = "runner connection lost (rc=%s); last commands: %s" % (
+            rc, " | ".join(c[:200] for c in cmds))
+        if any(re.search(r"\b(pkill|killall)\b", c) for c in cmds):
+            why += " - a broad kill terminated the runner"
+        return why
+
+    @staticmethod
+    def _bash_commands(text: str) -> list:
+        """Bash tool commands in a runner-log tail (JSON lines whose content blocks
+        are dicts or their repr strings; the first line may be cut off)."""
+        cmds = []
+        for line in text.splitlines():
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                msg = None
+            blocks = msg.get("content") if isinstance(msg, dict) else None
+            found = False
+            for b in blocks if isinstance(blocks, list) else []:
+                if isinstance(b, dict) and b.get("name") == "Bash" \
+                        and isinstance(b.get("input"), dict):
+                    cmds.append(str(b["input"].get("command") or ""))
+                    found = True
+                elif isinstance(b, str):
+                    for m in re.finditer(BASH_REPR, b):
+                        try:
+                            cmds.append(ast.literal_eval(m.group(1)))
+                            found = True
+                        except (ValueError, SyntaxError):
+                            pass
+            if not found and msg is None:       # cut-off first line: scan the raw text
+                for m in BASH_REPR.finditer(line):
+                    cmds.append(m.group(1)[1:-1])
+        return [c for c in cmds if c.strip()]
+
     async def _execute_code_task(self, task: dict, dep_values=None) -> dict:
         """Run one code task in its own worktree off `integration`, then merge
         its branch back under the run's merge lock. Dependency summaries come
@@ -1515,6 +1850,7 @@ Module path: {mpath}
         wt, branch = "%s/wt/%s" % (wd, task_id), "task/%s" % task_id
         q = shlex.quote
         direct = task.get("module") == "*"
+        review = task.get("role") == REVIEW_ROLE
         plan_tasks = plan.get("tasks") or []
         if direct:
             plan_task = {"id": "fix%d" % task["seq"]}
@@ -1528,6 +1864,7 @@ Module path: {mpath}
         self._update(task_id, model=model)
 
         failure, retries_left, asks = None, max(config.LEAF_RETRIES, 0), 0
+        conflict_retries = 1     # one extra retry, separate from the test-failure budget
         while True:
             async with self._merge_lock(run_id):
                 # fresh worktree off the current integration (also the resume,
@@ -1546,16 +1883,20 @@ Module path: {mpath}
                     await sb.run("[ -e %s ] && [ ! -e %s ] && [ ! -L %s ] && ln -s %s %s; true"
                                  % (q(src), q(dst), q(dst), q(src), q(dst)))
             self.db.log(task_id, "worktree", {"path": wt, "branch": None if direct else branch})
-            await sb.put("%s/.pipez/task.md" % wt, self._task_md(
-                self.db.get_task(task_id), run, plan_task, module, failure))
+            if review:
+                md = self._review_md(self.db.get_task(task_id), run, failure)
+            else:
+                md = self._task_md(self.db.get_task(task_id), run, plan_task, module, failure)
+            await sb.put("%s/.pipez/task.md" % wt, md)
 
+            settings = {"test_command": str(plan.get("test_command") or "").strip() or None,
+                        "review": bool(review)}
+            await sb.put("%s/.pipez/runner.json" % wt, json.dumps(settings))
             cmd = ("%s %s --cwd %s --task-file .pipez/task.md --model %s --max-turns %d "
                    "--max-budget-usd %s --log %s" % (
                        sb.python, q("%s/runner.py" % wd), q(wt), q(model),
                        config.LEAF_MAX_TURNS, config.LEAF_MAX_BUDGET_USD,
                        q("%s/logs/%s.jsonl" % (wd, task_id))))
-            if str(plan.get("test_command") or "").strip():
-                cmd += " --test-command %s" % q(str(plan["test_command"]).strip())
             env = {"ANTHROPIC_API_KEY": config.ANTHROPIC_API_KEY} if config.ANTHROPIC_API_KEY else None
             async with self.semaphore:
                 r = await sb.run(cmd, cwd=wt, env=env, timeout=config.LEAF_TIMEOUT)
@@ -1571,7 +1912,11 @@ Module path: {mpath}
 
             err = None
             if out is None:
-                why = "runner timed out" if r["rc"] == 124 else "runner produced no result (rc=%s)" % r["rc"]
+                if r["rc"] == 124:
+                    why = "runner timed out"
+                else:
+                    why = await self._diagnose_lost_runner(
+                        sb, "%s/logs/%s.jsonl" % (wd, task_id), r["rc"])
                 err = "%s: %s" % (why, self._tail(r["stderr"], 800))
             else:
                 self.db.add_tokens(task_id, int(out.get("input_tokens") or 0),
@@ -1581,6 +1926,8 @@ Module path: {mpath}
                 self.db.log(task_id, "runner", {k: out.get(k) for k in (
                     "ok", "commit", "files_changed", "tests", "cost_usd", "num_turns",
                     "is_error", "error", "needs_human")})
+                if review:
+                    tests = None        # the reviewer reports; nothing is gated on tests
                 if isinstance(out.get("needs_human"), dict) and not out.get("ok"):
                     asks += 1
                     if asks > MAX_TASK_QUESTIONS:
@@ -1590,6 +1937,8 @@ Module path: {mpath}
                     continue          # answered: not a failed attempt
                 if not out.get("ok") or out.get("is_error"):
                     err = "code task failed: %s" % (out.get("error") or "runner reported ok=false")
+                elif review:
+                    pass
                 elif config.LEAF_REQUIRE_TESTS and not tests:
                     err = "tests missing: runner reported no test results (tests: null)"
                 elif config.LEAF_REQUIRE_TESTS and (tests.get("failed") or 0) > 0:
@@ -1597,7 +1946,20 @@ Module path: {mpath}
                         tests.get("failed"), tests.get("rc"),
                         self._tail(tests.get("tail") or "", 1000))
             if err is None:
-                break
+                if review:
+                    break
+                async with self._merge_lock(run_id):
+                    conflict = await self._merge_leaf(task, sb, repo, branch, direct, out)
+                if conflict is None:
+                    break
+                if conflict_retries <= 0:
+                    raise LLMError(conflict["error"])
+                conflict_retries -= 1
+                failure = conflict["note"]
+                self.db.log(task_id, "leaf_retry", {"error": conflict["error"][:300],
+                                                    "tail": failure, "conflict": True,
+                                                    "retries_left": retries_left})
+                continue
             if retries_left <= 0:
                 raise LLMError(err)
             retries_left -= 1
@@ -1605,20 +1967,14 @@ Module path: {mpath}
             self.db.log(task_id, "leaf_retry", {"error": err[:300], "tail": failure,
                                                 "retries_left": retries_left})
 
-        async with self._merge_lock(run_id):
-            if direct:
-                r = await sb.git(["merge", "--ff-only", out["commit"]], cwd=repo)
-                if r["rc"]:
-                    raise LLMError("fix_merge_failed: %s" % self._tail(r["stderr"] or r["stdout"], 400))
-            else:
-                r = await sb.git(["merge", "--no-ff", branch, "-m",
-                                  "merge %s: %s" % (task_id, task["title"])], cwd=repo)
-                if r["rc"]:
-                    u = await sb.git(["diff", "--name-only", "--diff-filter=U"], cwd=repo)
-                    files = [f for f in u["stdout"].splitlines() if f.strip()]
-                    await sb.git(["merge", "--abort"], cwd=repo)
-                    self.db.log(task_id, "merge_conflict", {"files": files, "branch": branch})
-                    raise LLMError("merge_conflict: %s" % (", ".join(files) or self._tail(r["stderr"])))
+        if review:      # read-only: nothing to merge
+            result = {"summary": out.get("summary") or "", "output": "", "facts": [],
+                      "verdicts": (out.get("verdicts") or {}).get("verdicts") or [],
+                      "metadata": {"cost_usd": out.get("cost_usd"),
+                                   "num_turns": out.get("num_turns")}}
+            self._update(task_id, status="done", result=json.dumps(result),
+                         finished_at=time.time())
+            return result
 
         result = {
             "summary": out.get("summary") or "", "output": out.get("output") or "",

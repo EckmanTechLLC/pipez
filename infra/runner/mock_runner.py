@@ -5,7 +5,8 @@ commits, writes .pipez/result.json.
 
 Env: PIPEZ_MOCK_RUNNER_FAIL=<plan_id> reports tests.failed=1 for that task;
 PIPEZ_MOCK_RUNNER_CONFLICT=1 makes every task write the same CONFLICT.md with
-different content (merge-conflict test).
+different content (merge-conflict test); =once only on the first attempt (a task.md
+with a "# Previous attempt failed" section writes none, so the conflict retry succeeds).
 PIPEZ_MOCK_RUNNER_ASK=<plan_id>: that task writes .pipez/question.json and
 reports needs_human (once: a task.md with a "# Human answer" section completes).
 PIPEZ_MOCK_RUNNER_FLAKY=<plan_id>: that task fails (tests.failed=1) unless task.md
@@ -13,6 +14,9 @@ has a "# Previous attempt failed" section (retry test).
 PIPEZ_MOCK_RUNNER_FIXMARK=<file>: a fixer task (plan id fix*) writes that file.
 PIPEZ_MOCK_RUNNER_NOTESTS=<plan_id>: that task reports tests: null.
 PIPEZ_MOCK_RUNNER_SLEEP=<seconds>: sleep before working (stop test).
+--review: writes .pipez/verdicts.json (two confirmed verdicts, or one `wrong` when the
+task file contains MOCK_WRONG), commits nothing, runs no tests, and reports
+ok=false "reviewer modified the worktree" when the worktree is dirty.
 """
 import time
 import argparse
@@ -66,6 +70,31 @@ def field(text, label, default):
     return m.group(1) if m else default
 
 
+def review(a, cwd, text):
+    wrong = "MOCK_WRONG" in text
+    verdicts = ([{"claim": "criterion 1", "verdict": "wrong", "note": "mock: does not hold",
+                  "correction": "mock correction"}] if wrong else
+                [{"claim": "criterion %d" % i, "verdict": "confirmed", "note": "mock ok",
+                  "correction": ""} for i in (1, 2)])
+    os.makedirs(os.path.join(cwd, ".pipez"), exist_ok=True)
+    data = {"summary": "mock review: %s" % ("1 wrong" if wrong else "all confirmed"),
+            "ok": not wrong, "verdicts": verdicts}
+    with open(os.path.join(cwd, ".pipez", "verdicts.json"), "w") as f:
+        json.dump(data, f)
+    _, st = sh("git status --porcelain", cwd)
+    dirty = filter_paths([l[3:].split(" -> ")[-1] for l in st.splitlines() if len(l) > 3], cwd)
+    os.makedirs(os.path.dirname(os.path.abspath(a.log)), exist_ok=True)
+    with open(a.log, "a") as f:
+        f.write(json.dumps({"type": "MockRunner", "review": True}) + "\n")
+    sys.stdout.write(json.dumps({
+        "ok": not dirty, "summary": data["summary"], "output": "", "facts": [],
+        "files_changed": [], "commit": None, "tests": None, "verdicts": data,
+        "cost_usd": 0.01, "num_turns": 1, "input_tokens": 10, "output_tokens": 5,
+        "is_error": False,
+        "error": "reviewer modified the worktree: %s" % ", ".join(dirty) if dirty else None,
+    }) + "\n")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cwd", required=True)
@@ -75,18 +104,31 @@ def main():
     ap.add_argument("--max-budget-usd", type=float, default=5.0)
     ap.add_argument("--log", required=True)
     ap.add_argument("--test-command", default=None)
+    ap.add_argument("--review", action="store_true")
     a = ap.parse_args()
     cwd = os.path.abspath(a.cwd)
+    try:        # .pipez/runner.json: settings the engine keeps off argv
+        with open(os.path.join(cwd, ".pipez", "runner.json")) as f:
+            settings = json.load(f)
+    except (OSError, ValueError):
+        settings = {}
+    if not isinstance(settings, dict):
+        settings = {}
+    if a.test_command is None and settings.get("test_command"):
+        a.test_command = str(settings["test_command"])
+    a.review = a.review or bool(settings.get("review"))
     tf = a.task_file if os.path.isabs(a.task_file) else os.path.join(cwd, a.task_file)
     text = open(tf).read()
     plan_id = field(text, "Plan task id", "task")
     module = re.sub(r"[^A-Za-z0-9_]", "_", field(text, "Module", "mod")) or "mod"
+    if os.environ.get("PIPEZ_MOCK_RUNNER_SLEEP"):
+        time.sleep(float(os.environ["PIPEZ_MOCK_RUNNER_SLEEP"]))
+    if a.review:
+        return review(a, cwd, text)
     fail = os.environ.get("PIPEZ_MOCK_RUNNER_FAIL") == plan_id
     if os.environ.get("PIPEZ_MOCK_RUNNER_FLAKY") == plan_id \
             and not re.search(r"^# Previous attempt failed$", text, re.M):
         fail = True
-    if os.environ.get("PIPEZ_MOCK_RUNNER_SLEEP"):
-        time.sleep(float(os.environ["PIPEZ_MOCK_RUNNER_SLEEP"]))
     if os.environ.get("PIPEZ_MOCK_RUNNER_ASK") == plan_id \
             and not re.search(r"^# Human answer$", text, re.M):
         os.makedirs(os.path.join(cwd, ".pipez"), exist_ok=True)
@@ -113,7 +155,10 @@ def main():
         module = None
     else:
         os.makedirs(os.path.join(cwd, module), exist_ok=True)
-    if os.environ.get("PIPEZ_MOCK_RUNNER_CONFLICT") == "1":
+    conflict = os.environ.get("PIPEZ_MOCK_RUNNER_CONFLICT")
+    if conflict == "once" and not re.search(r"^# Previous attempt failed$", text, re.M):
+        conflict = "1"      # "once": only the first attempt writes CONFLICT.md
+    if conflict == "1":
         with open(os.path.join(cwd, "CONFLICT.md"), "w") as f:
             f.write("written by %s\n" % plan_id)
         files.append("CONFLICT.md")

@@ -453,7 +453,30 @@ function runIt(run) {
   return `<details open><summary>Run it</summary><div class="md">${md(res.output)}</div></details>`;
 }
 
+function showVerdicts() {
+  const root = [...(tasksByRun.get(currentRun) || new Map()).values()].find(t => !t.parent_id);
+  if (!root) return;
+  selectedTask = root.id; render();
+  setTimeout(() => $("panel")?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 0);
+}
+
+// Plan runs: badge for the acceptance review (runs.verification) + re-verify.
+function reviewBadge(run) {
+  if (run.status === "verifying") return " · reviewing…";
+  if (run.status !== "done") return null;
+  const sb = sandboxByRun.get(run.id), dp = deploymentByRun.get(run.id);
+  const canRe = sb && ["kept", "ready"].includes(sb.status) && dp?.status === "ready";
+  const re = canRe ? ` <button class="verify-btn" onclick="verifyRun()">re-verify</button>` : "";
+  if (run.verification === "passed") return ` · <span class="s-done">verified ✓</span>` + re;
+  if (run.verification === "failed")
+    return ` · <a href="#" class="s-failed" onclick="showVerdicts();return false">verification failed</a>` + re;
+  if (run.verification === "error")
+    return ` · <a href="#" class="s-failed" onclick="showVerdicts();return false">review error</a>` + re;
+  return re ? " ·" + re : "";
+}
+
 function verifySummary(run) {
+  if (run.plan) { const b = reviewBadge(run); if (b !== null) return b; }
   const vs = verificationsByRun.get(run.id) || [];
   if (vs.length) {
     let c = 0, u = 0, w = 0;
@@ -485,7 +508,8 @@ function verifySummary(run) {
 }
 
 function stopButton(run) {
-  if (["done", "failed", "cancelled", "verifying"].includes(run.status)) return "";
+  if (["done", "failed", "cancelled"].includes(run.status)
+      || (run.status === "verifying" && !run.plan)) return "";
   return ` · <button class="verify-btn stop-btn" onclick="stopRun()">Stop</button>`;
 }
 
@@ -622,7 +646,13 @@ function renderPanel() {
   for (const v of vrows) {
     let verdicts = [];
     try { verdicts = JSON.parse(v.verdicts); } catch {}
-    html += `<div class="section-label">verification</div>`;
+    const nr = vrows.length, rd = v.round || (vrows.indexOf(v) + 1);
+    const res = verdicts.some(d => d.verdict === "wrong") ? "failed"
+              : verdicts.length ? "passed" : "error";
+    const rcls = res === "passed" ? "s-done" : "s-failed";
+    html += `<div class="section-label">verification` +
+      (nr > 1 ? ` — review round ${rd} of ${nr}` : "") +
+      ` · <span class="${rcls}">${res}</span></div>`;
     if (v.summary) html += `<div class="md">${md(v.summary)}</div>`;
     if (verdicts.length) {
       html += `<table id="facts-table"><thead><tr><th>Claim</th><th>Verdict</th><th>Note</th></tr></thead><tbody>`;

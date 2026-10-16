@@ -143,3 +143,10 @@ DEPLOY_AUTO = os.environ.get("PIPEZ_DEPLOY_AUTO", "1") == "1"
 DEPLOY_TEMPLATE = int(os.environ.get("PIPEZ_PVE_DEPLOY_TEMPLATE", "9000") or 9000)
 DEPLOY_VMID_RANGE = os.environ.get("PIPEZ_PVE_DEPLOY_VMID_RANGE", "9200-9299")
 DEPLOY_HEALTH_TIMEOUT = float(os.environ.get("PIPEZ_DEPLOY_HEALTH_TIMEOUT", "180"))
+
+# Acceptance review (task 13a): after a deploy is ready, a read-only reviewer
+# leaf checks the build against the plan's acceptance criteria.
+VERIFY_AUTO = os.environ.get("PIPEZ_VERIFY_AUTO", "1") == "1"
+VERIFY_TIER = os.environ.get("PIPEZ_VERIFY_TIER", "standard")
+# Fix rounds after a failed acceptance review (fixer -> re-integrate -> fresh deploy -> review).
+VERIFY_ROUNDS = int(os.environ.get("PIPEZ_VERIFY_ROUNDS", "1"))
