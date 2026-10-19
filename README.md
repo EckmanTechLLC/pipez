@@ -27,6 +27,7 @@ Stop: `fuser -k 8400/tcp`
 | `PIPEZ_LOCAL_TIMEOUT` / `PIPEZ_LOCAL_TEMPERATURE` | 600 / 0.2 | local call timeout (s), sampling temperature |
 | `PIPEZ_LOCAL_THINKING` | 0 | 1 = enable qwen3 thinking (`enable_thinking`) |
 | `PIPEZ_ESCALATE` | 1 | on a failed call, retry on the next tier up (local, light, standard, deep) |
+| `PIPEZ_INTAKE_TIER` | `deep` | tier of the intake discovery call (invalid names fall back to `deep`) |
 | `PIPEZ_MAX_TOKENS` | 128000 | per-call output cap |
 | `PIPEZ_TASK_RETRIES` / `PIPEZ_RETRY_DELAY` | 3 / 20 | transient-failure retries, base delay (s) |
 | `PIPEZ_FALLBACKS` | 1 | server-side refusal fallbacks |

@@ -147,6 +147,11 @@
   .dcard { border: 1px solid var(--border); border-radius: 5px; padding: 10px 14px;
            margin: 10px 0; background: var(--panel); }
   .dcard.locked { opacity: .8; }
+  .sprefs { border: 1px dashed var(--border); border-radius: 5px; padding: 8px 14px; margin: 10px 0; }
+  .sprefs h3 { margin: 0 0 6px; font-size: 13px; }
+  .sprefs .sp { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; padding: 3px 0; }
+  .sprefs .small { padding: 1px 8px; font-size: 11px; font-weight: 400; }
+  .sprefs .ev { color: var(--dim); font-style: italic; }
   .dcard .q { font-weight: 700; }
   .dcard .why { color: var(--dim); font-size: 12.5px; margin: 2px 0 6px; }
   .badge { display: inline-block; font: 11px var(--mono); border-radius: 10px;
@@ -795,6 +800,19 @@ function badge(d) {
   return `<span class="badge b-${esc(src)}" title="${esc(tip.join("\n"))}">${esc(label)}</span>`;
 }
 
+function spDismissed(runId) {
+  try {
+    const v = JSON.parse(localStorage.getItem("pipez.dismissed." + runId) || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch (e) { return []; }
+}
+
+function spMarkPinned(btn) {
+  btn.disabled = true;
+  if (!btn.parentNode.querySelector(".b-pinned"))
+    btn.insertAdjacentHTML("afterend", `<span class="badge b-pinned">pinned</span>`);
+}
+
 function renderIntake(run, iv) {
   const box = $("intake");
   const key = run.id + ":" + run.status + ":" + JSON.stringify(iv.decisions || []).length;
@@ -805,6 +823,18 @@ function renderIntake(run, iv) {
   let html = `<div class="req">${esc((run.request || "").slice(0, 200))}</div>` +
              `<div class="summary">${esc(summary)}</div>`;
   if (!decisions.length) html += `<div class="summary">Loading decisions…</div>`;
+  const sps = (run.intake_meta?.discovery?.standing_preferences || [])
+    .filter(s => !spDismissed(run.id).includes(s.key));
+  if (sps.length) {
+    html += `<div class="sprefs"><h3>Standing preferences stated in your request</h3>`;
+    sps.forEach((s, i) => {
+      html += `<div class="sp" data-i="${i}"><b>${esc(s.key)}</b> = ${esc(s.value)}` +
+        `<span class="ev">“${esc(s.evidence)}”</span>` +
+        `<button class="small" data-sp="pin" data-k="${esc(s.key)}" data-v="${esc(s.value)}">pin</button>` +
+        `<button class="small alt" data-sp="dismiss" data-k="${esc(s.key)}">dismiss</button></div>`;
+    });
+    html += `</div>`;
+  }
   for (const d of decisions) {
     const st = draftFor(run.id, d);
     const prevAns = iv.answers || run.answers || {};
@@ -859,6 +889,33 @@ function renderIntake(run, iv) {
     card.querySelector(".custom").oninput = e => { st.custom = e.target.value; sync(); };
     card.querySelector(".reason").oninput = e => { st.reason = e.target.value; };
   });
+  box.querySelectorAll("[data-sp]").forEach(btn => {
+    btn.onclick = async () => {
+      if (btn.dataset.sp === "dismiss") {
+        try {
+          const cur = spDismissed(run.id);
+          cur.push(btn.dataset.k);
+          localStorage.setItem("pipez.dismissed." + run.id, JSON.stringify(cur));
+        } catch (e) { /* storage unavailable */ }
+        btn.closest(".sp").remove();
+        return;
+      }
+      try {
+        const res = await fetch(`/api/preferences/${encodeURIComponent(btn.dataset.k)}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ value: btn.dataset.v }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        spMarkPinned(btn);
+      } catch (err) { btn.title = "pin failed: " + err.message; }
+    };
+  });
+  fetch("/api/preferences").then(r => r.ok ? r.json() : {}).then(prefs => {
+    box.querySelectorAll("[data-sp=pin]").forEach(btn => {
+      const p = prefs[btn.dataset.k];
+      if (p && p.source === "pinned" && p.value === btn.dataset.v) spMarkPinned(btn);
+    });
+  }).catch(() => {});
   $("acceptall").onclick = () => postIntake(run.id, { accept_all: true });
   $("submitans").onclick = () => {
     const answers = {}, reasons = {};

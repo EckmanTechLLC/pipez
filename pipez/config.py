@@ -56,6 +56,15 @@ if LOCAL_BASE_URL:
                             "effort": "low", "base_url": LOCAL_BASE_URL}
 DEFAULT_TIER = "deep"
 
+
+def valid_tier(name: str, default: str = "deep") -> str:
+    """`name` if it is a configured tier, else `default` (never raises)."""
+    return name if name in MODEL_TIERS else default
+
+
+# Tier of the intake discovery call (when `local` is not auto-selected for it).
+INTAKE_TIER = valid_tier(os.environ.get("PIPEZ_INTAKE_TIER", "deep"))
+
 # List prices, USD per million tokens (input, output), keyed by model id.
 # PIPEZ_PRICES_JSON ({"model": [in, out]}) is merged over these defaults.
 PRICES_PER_MTOK = {

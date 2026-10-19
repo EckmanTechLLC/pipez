@@ -256,14 +256,15 @@ class Engine:
         return system, "\n\n".join(parts)
 
     async def _intake(self, run_id: str):
-        """Discovery: ask the deep tier for human-necessary decisions,
+        """Discovery: ask the intake tier for human-necessary decisions,
         pre-fill each from the preference store, pause as awaiting_human."""
         try:
             run = self.db.get_run(run_id)
             system, prompt = self._intake_prompt(run)
             started = time.time()
             (out, usage), tier_name = await self._run_llm_call(
-                run_id, "local" if config.local_allowed("intake") else "deep",
+                run_id,
+                "local" if config.local_allowed("intake") else config.INTAKE_TIER,
                 lambda tier: self.llm.intake(system, prompt, tier))
             self._add_spend(run_id, None, "intake", usage)
             request_values = out.get("request_values") or {}
@@ -282,7 +283,21 @@ class Engine:
                     d, prefill={"value": r["value"], "source": r["source"],
                                 "evidence": r["evidence"]},
                     locked=d["key"] in request_values))
+            standing = []
+            for sp in out.get("standing_preferences") or []:
+                k, v = (sp.get("key") or "").strip(), (sp.get("value") or "").strip()
+                if not k or not v or k.startswith("open."):
+                    continue
+                cur = self.prefs.resolve(k, run["project_id"])
+                if cur["source"] == "pinned" and cur["value"] == v:
+                    continue
+                standing.append({"key": k, "value": v,
+                                 "evidence": sp.get("evidence") or ""})
+            if standing:
+                self.db.log("run:%s" % run_id, "standing_prefs",
+                            {"keys": [s["key"] for s in standing]})
             meta = {"summary": out.get("summary", ""), "tier": tier_name,
+                    "standing_preferences": standing,
                     "model": usage.get("model"),
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
@@ -382,7 +397,8 @@ class Engine:
         table = self._decision_table(decisions, answers, sources or {})
         opens = [d for d in decisions if d.get("free_text")]
         resolved = "\n".join(
-            "- Q: %s\n  A: %s" % (d["question"], answers[d["key"]])
+            "- Q: %s (key: %s)\n  A: %s" % (
+                d["question"], d["key"], answers[d["key"]])
             for d in opens if d["key"] in answers)
         system = self.db.get_prompt("intake_brief") or ""
         parts = ["# Original request\n%s" % run["request"]]
@@ -392,6 +408,30 @@ class Engine:
         if resolved:
             parts.append("# Resolved open questions\n%s" % resolved)
         return system, "\n\n".join(parts)
+
+    def _record_normalised(self, run: dict, items: list):
+        """Record brief-call normalised_answers as global intake observations
+        (never pins). Accepts only free_text answers mapped onto known keys
+        that this run has not answered itself."""
+        run_id, answers = run["id"], run["answers"] or {}
+        free = {d["key"] for d in run["decisions"] if d.get("free_text")}
+        known = {k for k in self.prefs.resolve_all(run["project_id"])
+                 if not k.startswith("open.")}
+        known.update((self.db.get_prompt("intake_key_vocabulary")
+                      or seed_prompts.DEFAULTS["intake_key_vocabulary"]).split())
+        accepted, rejected = [], []
+        for it in items:
+            k, v, fk = it.get("key"), it.get("value"), it.get("from_key")
+            if fk in free and fk in answers and k and v \
+                    and not k.startswith("open.") and k in known \
+                    and k not in answers:
+                self.prefs.observe(k, v, "global", "intake", run["project_id"],
+                                   run_id, reason="normalised from %s" % fk)
+                accepted.append({"key": k, "value": v, "from_key": fk})
+            else:
+                rejected.append({"key": k, "value": v, "from_key": fk})
+        self.db.log("run:%s" % run_id, "normalised_answers",
+                    {"accepted": accepted, "rejected": rejected})
 
     async def _brief_and_start(self, run_id: str, sources: dict = None):
         try:
@@ -437,6 +477,7 @@ class Engine:
                             {"round": rnd, "keys": [d["key"] for d in new]})
                 self._set_phase(run_id, "awaiting_human")
                 return
+            self._record_normalised(run, out.get("normalised_answers") or [])
             if resolved:
                 text += "\n\n## Resolved open questions\n" + resolved
             if questions:

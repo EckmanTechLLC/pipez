@@ -10,6 +10,7 @@ import asyncio
 import copy
 import logging
 import os
+import re
 
 from . import config
 from .providers import (AnthropicProvider, LLMError, OpenAICompatProvider,
@@ -154,8 +155,20 @@ INTAKE_SCHEMA = {
                 "additionalProperties": False,
             },
         },
+        "standing_preferences": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"key": {"type": "string"},
+                               "value": {"type": "string"},
+                               "evidence": {"type": "string"}},
+                "required": ["key", "value", "evidence"],
+                "additionalProperties": False,
+            },
+        },
     },
-    "required": ["summary", "request_values", "decisions"],
+    "required": ["summary", "request_values", "decisions",
+                 "standing_preferences"],
     "additionalProperties": False,
 }
 
@@ -165,8 +178,20 @@ BRIEF_SCHEMA = {
         "brief": {"type": "string"},
         "constraints": {"type": "array", "items": {"type": "string"}},
         "open_questions": {"type": "array", "items": {"type": "string"}},
+        "normalised_answers": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"key": {"type": "string"},
+                               "value": {"type": "string"},
+                               "from_key": {"type": "string"}},
+                "required": ["key", "value", "from_key"],
+                "additionalProperties": False,
+            },
+        },
     },
-    "required": ["brief", "constraints", "open_questions"],
+    "required": ["brief", "constraints", "open_questions",
+                 "normalised_answers"],
     "additionalProperties": False,
 }
 
@@ -398,6 +423,9 @@ class MockLLM:
         return {
             "summary": "mock intake summary",
             "request_values": {},
+            "standing_preferences": (
+                [{"key": "legal.license", "value": "MIT",
+                  "evidence": "always MIT"}] if "always MIT" in prompt else []),
             "decisions": [
                 {"key": "storage.database", "question": "Which database?",
                  "why_it_matters": "Determines persistence and ops burden.",
@@ -420,10 +448,16 @@ class MockLLM:
         # One open question until the prompt carries the resolved answers.
         oq = [] if "Resolved open questions" in prompt else \
             ["Which name should the product go by?"]
+        norm = []
+        if "use sqlite" in prompt:
+            m = re.search(r"open\.[a-z0-9_]+", prompt)
+            if m:
+                norm = [{"key": "storage.database", "value": "sqlite",
+                         "from_key": m.group(0)}]
         return {"brief": "# Build brief (mock)\n\nBuild what was requested, "
                          "honouring the decisions below.",
                 "constraints": ["Honour every decision in the table."],
-                "open_questions": oq}, \
+                "open_questions": oq, "normalised_answers": norm}, \
                {"input_tokens": 1000, "output_tokens": 100, "model": "mock"}
 
     async def plan(self, system: str, prompt: str,

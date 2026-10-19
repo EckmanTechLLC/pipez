@@ -171,7 +171,13 @@ DEFAULTS = {
         "use, with their current resolved value where one exists. Whenever a "
         "decision is the same concept as a known key, reuse that key exactly "
         "(do not rephrase or respell it). Invent a new lowercase dotted key "
-        "only for a genuinely new concept."
+        "only for a genuinely new concept.\n\n"
+        "STANDING PREFERENCES: separately, list in standing_preferences only "
+        "those preferences the request states as durable - worded as always / "
+        "never / in all my projects / from now on / my standard. A "
+        "requirement for this one build is NOT a standing preference. Each "
+        "has a key (reuse a known key), a value, and evidence, a verbatim "
+        "quote from the request. Return an empty list when there are none."
     ),
     "intake_key_vocabulary": (
         "runtime.language\nstorage.database\nauth.method\n"
@@ -194,7 +200,12 @@ DEFAULTS = {
         "reviews decisions, not guesses. If the input has a 'Resolved open "
         "questions' section, those answers are binding like decisions and "
         "must not be asked again. Do not reproduce the decision table; it is "
-        "appended separately and exactly."
+        "appended separately and exactly.\n\n"
+        "NORMALISED ANSWERS: when a resolved open question's answer clearly "
+        "settles a known decision key, emit it in normalised_answers with "
+        "from_key set to the open.* key of that question and value in the "
+        "known key's vocabulary style. Never invent keys. Return an empty "
+        "list otherwise."
     ),
     "plan_architect": (
         "You are the software architect for pipez. Turn the build brief into "

@@ -120,3 +120,68 @@ def test_bench_dry_run(monkeypatch, tmp_path, capsys):
     assert out.count("plan: intake") == 2 and out.count("plan: brief") == 2
     assert "estimated spend" in out
     assert not (tmp_path / "o").exists()
+
+
+def test_intake_tier_default_and_validation(monkeypatch):
+    assert config.INTAKE_TIER == "deep"
+    assert config.valid_tier("standard") == "standard"
+    assert config.valid_tier("nonsense") == "deep"
+
+
+async def test_intake_uses_config_tier(monkeypatch, tmp_path):
+    seen = []
+
+    class Spy(MockLLM):
+        async def intake(self, system, prompt, tier=None):
+            seen.append(tier)
+            return await super().intake(system, prompt, tier)
+
+    db = Database(str(tmp_path / "i.sqlite3"))
+    seed_prompts.seed(db)
+    engine = Engine(db, EventBus(), Spy())
+    monkeypatch.setattr(config, "INTAKE_TIER", "standard")
+    run_id = db.create_run("req")
+    await engine._intake(run_id)
+    assert seen and seen[0] == config.MODEL_TIERS["standard"]
+
+
+def test_bench_request_files_dry_run(monkeypatch, tmp_path, capsys):
+    _with_local(monkeypatch)
+    monkeypatch.setattr(config, "MOCK", False)
+    db, _ = _engine(tmp_path)
+    _stored_run(db)
+    db._conn.commit()
+    reqs = tmp_path / "reqs"
+    reqs.mkdir()
+    (reqs / "a.md").write_text("Build A\n")
+    (reqs / "b.md").write_text("Build B\n")
+    (reqs / "ignore.txt").write_text("no")
+    rc = bench_local.main(["--db", db.path, "--dry-run", "--stages", "intake,brief",
+                           "--tiers", "standard", "--reference-tier", "deep",
+                           "--request-files", str(reqs), "--max-per-stage", "0"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.count("plan: intake run req:") == 2
+    assert "req:a" in out and "req:b" in out
+    assert "plan: brief" not in out
+    assert "tiers deep,standard" in out
+
+
+def test_agreement_intake_against_reference():
+    def dec(key, default, **kw):
+        return dict({"key": key, "proposed_default": default}, **kw)
+
+    ref = {"decisions": [dec("lang", "py"), dec("db", "sqlite"), dec("ui", "cli")],
+           "request_values": {"lang": "py", "db": "sqlite"}}
+    out = {"decisions": [dec("lang", "py"), dec("db", "pg"), dec("auth", "none")],
+           "request_values": {"lang": "py"}}
+    a = bench_local.agreement_intake(out, {}, ref)
+    assert a["key_jaccard"] == pytest.approx(2 / 4)
+    assert a["default_agree"] == pytest.approx(1 / 2)
+    assert a["locked_agree"] == pytest.approx(1 / 2)
+    # stored run: locked decisions are the reference set
+    run = {"decisions": [dec("lang", "py", locked=True), dec("db", "pg", locked=False)]}
+    b = bench_local.agreement_intake(out, run)
+    assert b["locked_agree"] == 1.0
+    assert b["key_jaccard"] == pytest.approx(2 / 3)
+    assert bench_local.agreement_intake({}, {}, {})["locked_agree"] == 1.0
