@@ -45,6 +45,29 @@ async def startup():
         await engine.sweep()
     except Exception:
         logging.getLogger(__name__).exception("startup orphan sweep failed")
+    global _expire_task
+    _expire_task = asyncio.create_task(_expire_loop())
+
+
+_expire_task = None
+
+
+async def _expire_loop():
+    log = logging.getLogger(__name__)
+    while True:
+        try:
+            await engine.expire_deployments()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("deployment expiry pass failed")
+        await asyncio.sleep(max(config.DEPLOY_SWEEP_SECONDS, 1))
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    if _expire_task is not None:
+        _expire_task.cancel()
 
 
 class SubmitRequest(BaseModel):
@@ -208,6 +231,23 @@ async def run_deployment(run_id: str):
 @app.get("/api/deployments")
 async def deployments():
     return db.list_deployments()
+
+
+class KeepBody(BaseModel):
+    keep: bool
+
+
+@app.post("/api/deployments/expire")
+async def expire_deployments():
+    return await engine.expire_deployments()
+
+
+@app.put("/api/runs/{run_id}/deployment/keep")
+async def keep_deployment(run_id: str, body: KeepBody):
+    try:
+        return engine.set_deploy_keep(run_id, body.keep)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
 
 @app.post("/api/runs/{run_id}/deploy")

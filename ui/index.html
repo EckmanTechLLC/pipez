@@ -200,20 +200,22 @@
   #briefwrap .answers { font: 12px var(--mono); border-collapse: collapse; width: auto; margin: 6px 0; }
   #briefwrap .answers td { padding: 2px 12px 2px 0; border: 0; white-space: normal; }
   .ovr { color: var(--running); font-weight: 700; }
-  #prefbtn { margin-left: auto; padding: 3px 12px; font-size: 12px;
+  #depbtn { margin-left: auto; padding: 3px 12px; font-size: 12px;
              background: var(--panel); color: var(--accent); border: 1px solid var(--border); }
-  #prefs { position: fixed; top: 0; right: 0; bottom: 0; width: 640px; max-width: 95vw;
+  #prefbtn { margin-left: 8px; padding: 3px 12px; font-size: 12px;
+             background: var(--panel); color: var(--accent); border: 1px solid var(--border); }
+  #prefs, #deps { position: fixed; top: 0; right: 0; bottom: 0; width: 640px; max-width: 95vw;
            background: #fff; border-left: 1px solid var(--border); z-index: 10;
            overflow-y: auto; display: none; padding: 14px 18px; box-shadow: -4px 0 12px rgba(0,0,0,.12);
            font-size: 12px; }
-  #prefs.open { display: block; }
-  #prefs h2 { font-size: 14px; margin: 0 0 8px; }
-  #prefs .close { float: right; background: none; color: var(--dim); font-size: 16px; padding: 0 6px; }
-  #prefs td, #prefs th { white-space: normal; vertical-align: top; }
-  #prefs .small { padding: 1px 8px; font-size: 11px; font-weight: 400; background: var(--panel);
+  #prefs.open, #deps.open { display: block; }
+  #prefs h2, #deps h2 { font-size: 14px; margin: 0 0 8px; }
+  #prefs .close, #deps .close { float: right; background: none; color: var(--dim); font-size: 16px; padding: 0 6px; }
+  #prefs td, #prefs th, #deps td, #deps th { white-space: normal; vertical-align: top; }
+  #prefs .small, #deps .small { padding: 1px 8px; font-size: 11px; font-weight: 400; background: var(--panel);
                   color: var(--accent); border: 1px solid var(--border); margin-right: 4px; }
-  #prefs a { color: var(--accent); cursor: pointer; text-decoration: underline; }
-  #prefs .obs { background: var(--panel); }
+  #prefs a, #deps a { color: var(--accent); cursor: pointer; text-decoration: underline; }
+  #prefs .obs, #deps .obs { background: var(--panel); }
   footer { padding: 8px 18px; color: var(--dim); font-size: 11px;
            border-top: 1px solid var(--border); }
 </style>
@@ -223,9 +225,11 @@
   <h1>PIPEZ</h1>
   <span class="sub">hierarchical task engine — dev console</span>
   <span class="sub" id="conn">connecting…</span>
+  <button id="depbtn" class="hdrbtn">Deployments</button>
   <button id="prefbtn">Preferences</button>
 </header>
 <div id="prefs"></div>
+<div id="deps"></div>
 <div id="controls">
   <input id="req" placeholder="Describe the task…" autocomplete="off">
   <button id="go">Run</button>
@@ -323,6 +327,7 @@ function connect() {
       sandboxByRun.set(msg.run_id, msg.sandbox);
     } else if (msg.type === "deployment") {
       deploymentByRun.set(msg.run_id, msg.deployment);
+      if ($("deps").classList.contains("open")) loadDeps();
     } else if (msg.type === "artifacts") {
       artifactsByRun.set(msg.run_id, msg.files);
     } else if (msg.type === "verification") {
@@ -479,7 +484,7 @@ function reviewBadge(run) {
   if (run.verification === "failed")
     return ` · <a href="#" class="s-failed" onclick="showVerdicts();return false">verification failed</a>` + re;
   if (run.verification === "error")
-    return ` · <a href="#" class="s-failed" onclick="showVerdicts();return false">review error</a>` + re;
+    return ` · <a href="#" class="s-failed" title="${esc(dp?.status === "failed" ? "deployment failed: " + (dp.error || "") : "the acceptance review could not complete")}" onclick="showVerdicts();return false">review error</a>` + re;
   return re ? " ·" + re : "";
 }
 
@@ -584,6 +589,8 @@ function deployBadge(run) {
   const undeployBtn = ` <button class="verify-btn" onclick="undeployRun()">Undeploy</button>`;
   if (dp.status === "ready")
     return ` · <span class="art">deploy: ready</span> <a class="art" href="${esc(dp.url)}" target="_blank" rel="noopener">${esc(dp.url)}</a>` +
+      ` <span class="art">${esc(expiryText(dp))}</span>` +
+      ` <button class="verify-btn" onclick="keepDeploy('${esc(run.id)}', ${dp.keep ? "false" : "true"})">${dp.keep ? "unkeep" : "keep"}</button>` +
       undeployBtn;
   if (dp.status === "failed") {
     const tail = String(dp.error || "").slice(-300);
@@ -593,6 +600,25 @@ function deployBadge(run) {
   if (dp.status === "destroyed")
     return ` · <span class="art">deploy: destroyed</span>` + (canDeploy ? deployBtn : "");
   return ` · <span class="art">deploy: ${esc(dp.status)}…</span>`;
+}
+
+function expiryText(dp) {
+  if (dp.keep) return "kept";
+  if (dp.expires_at == null) return "no expiry";
+  const h = (dp.expires_at - Date.now() / 1000) / 3600;
+  return h <= 0 ? "expiring" : "expires in " + Math.max(1, Math.round(h)) + "h";
+}
+
+async function keepDeploy(runId, keep) {
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/deployment/keep`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keep }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+  } catch (err) {
+    alert("keep failed: " + err.message);
+  }
 }
 
 async function deployAction(what) {
@@ -1290,6 +1316,78 @@ function togglePrefs() {
   if (box.classList.contains("open")) loadPrefs();
 }
 $("prefbtn").onclick = togglePrefs;
+
+// ---- deployments panel ----------------------------------------------------
+let showDestroyed = false;
+
+function ageText(ts) {
+  if (!ts) return "";
+  const h = (Date.now() / 1000 - ts) / 3600;
+  return h < 1 ? Math.round(h * 60) + "m" : h < 48 ? Math.round(h) + "h" : Math.round(h / 24) + "d";
+}
+
+async function loadDeps() {
+  const box = $("deps");
+  try {
+    const res = await fetch("/api/deployments");
+    if (!res.ok) throw new Error(await res.text());
+    const rows = await res.json();
+    const live = rows.filter(r => r.status !== "destroyed");
+    const gone = rows.filter(r => r.status === "destroyed");
+    const row = r => {
+      const id = esc(r.run_id);
+      const ready = r.status === "ready";
+      return `<tr><td><a data-act="sel" data-r="${id}">${id}</a></td>` +
+        `<td>${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a>` : "—"}</td>` +
+        `<td>${esc(r.status)}</td><td>${esc(ageText(r.created_at))}</td>` +
+        `<td>${ready ? esc(expiryText(r)) : ""}</td>` +
+        `<td>${ready ? `<button class="small" data-act="keep" data-r="${id}" data-keep="${r.keep ? 0 : 1}">${r.keep ? "unkeep" : "keep"}</button>` : ""}` +
+        `${ready || r.status === "failed" ? `<button class="small" data-act="undeploy" data-r="${id}">Undeploy</button>` : ""}</td></tr>`;
+    };
+    let html = `<button class="close" onclick="toggleDeps()">✕</button><h2>Deployments</h2>` +
+      `<table><thead><tr><th>Run</th><th>URL</th><th>Status</th><th>Age</th><th>Expires</th><th></th></tr></thead><tbody>`;
+    html += live.length ? live.map(row).join("") : `<tr><td colspan="6">no deployments</td></tr>`;
+    html += `</tbody></table>`;
+    if (gone.length) {
+      html += `<p><a data-act="toggle-destroyed">${showDestroyed ? "hide" : "show"} destroyed (${gone.length})</a></p>`;
+      if (showDestroyed)
+        html += `<table><tbody>${gone.map(row).join("")}</tbody></table>`;
+    }
+    box.innerHTML = html;
+    box.querySelectorAll("[data-act]").forEach(el => el.onclick = () => depAction(el.dataset));
+  } catch (err) {
+    box.innerHTML = `<button class="close" onclick="toggleDeps()">✕</button>` +
+      `<div class="err">failed to load deployments: ${esc(err.message)}</div>`;
+  }
+}
+
+async function depAction(d) {
+  try {
+    if (d.act === "sel") {
+      currentRun = d.r; userPinnedRun = true; selectedTask = null; render();
+    } else if (d.act === "keep") {
+      await keepDeploy(d.r, d.keep === "1");
+      await loadDeps();
+    } else if (d.act === "undeploy") {
+      if (!confirm("Destroy the deployed VM?")) return;
+      const res = await fetch(`/api/runs/${encodeURIComponent(d.r)}/undeploy`, { method: "POST" });
+      if (!res.ok) throw new Error(await res.text());
+      await loadDeps();
+    } else if (d.act === "toggle-destroyed") {
+      showDestroyed = !showDestroyed;
+      await loadDeps();
+    }
+  } catch (err) {
+    alert(`${d.act} failed: ${err.message}`);
+  }
+}
+
+function toggleDeps() {
+  const box = $("deps");
+  box.classList.toggle("open");
+  if (box.classList.contains("open")) loadDeps();
+}
+$("depbtn").onclick = toggleDeps;
 
 $("runsel").onchange = e => {
   currentRun = e.target.value; userPinnedRun = true; selectedTask = null; render();

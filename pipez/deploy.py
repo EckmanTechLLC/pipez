@@ -125,7 +125,7 @@ def make_deploy_sandbox(run_id: str, client=None):
         return MockDeploySandbox(run_id)
     return PveSandbox(run_id, client, template=config.DEPLOY_TEMPLATE,
                       vmid_range=config.DEPLOY_VMID_RANGE, name_prefix="pipez-app-",
-                      cores=2, memory=2048)
+                      cores=2, memory=2048, boot_timeout=config.DEPLOY_BOOT_TIMEOUT)
 
 
 class Deployer:

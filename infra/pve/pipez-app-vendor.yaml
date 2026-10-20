@@ -1,0 +1,16 @@
+#cloud-config
+# Used ONCE to bake template 9002 (pipez-app-base). Deploy VMs are clones of it.
+package_update: true
+
+packages:
+  - qemu-guest-agent
+  - python3
+  - python3-venv
+  - python3-pip
+  - curl
+  - ca-certificates
+  - rsync
+  - gnupg
+
+runcmd:
+  - systemctl enable --now qemu-guest-agent

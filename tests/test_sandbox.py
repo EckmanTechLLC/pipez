@@ -30,16 +30,16 @@ async def test_secret_env_goes_to_dotenv_not_command():
     await sb.provision()
     try:
         r = await sb.run('echo "$PLAIN:$MY_API_KEY:$X_SECRET:$GH_TOKEN"',
-                         env={"PLAIN": "p", "MY_API_KEY": "k1", "X_SECRET": "s1",
-                              "GH_TOKEN": "t1"})
-        assert r["stdout"].strip() == "p:k1:s1:t1"
+                         env={"PLAIN": "p", "MY_API_KEY": "k1-VALUE-4d5e6f", "X_SECRET": "s1-VALUE-7a8b9c",
+                              "GH_TOKEN": "s3cr3t-VALUE-9f8e7d"})
+        assert r["stdout"].strip() == "p:k1-VALUE-4d5e6f:s1-VALUE-7a8b9c:s3cr3t-VALUE-9f8e7d"
         line = sb.last_command
         assert "PLAIN=p" in line and ".env" in line
-        for secret in ("k1", "s1", "t1", "MY_API_KEY=", "X_SECRET=", "GH_TOKEN="):
+        for secret in ("k1-VALUE-4d5e6f", "s1-VALUE-7a8b9c", "s3cr3t-VALUE-9f8e7d", "MY_API_KEY=", "X_SECRET=", "GH_TOKEN="):
             assert secret not in line
         envfile = os.path.join(sb.workdir, ".env")
         assert oct(os.stat(envfile).st_mode & 0o777) == "0o600"
-        assert "MY_API_KEY=k1" in open(envfile).read()
+        assert "MY_API_KEY=k1-VALUE-4d5e6f" in open(envfile).read()
     finally:
         await sb.teardown(False)
 

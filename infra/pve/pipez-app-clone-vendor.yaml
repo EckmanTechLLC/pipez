@@ -1,0 +1,4 @@
+#cloud-config
+# Carried by template 9002; per-clone first boot installs nothing.
+runcmd:
+  - [ systemctl, enable, --now, qemu-guest-agent ]

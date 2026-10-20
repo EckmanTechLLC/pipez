@@ -43,7 +43,8 @@ Stop: `fuser -k 8400/tcp`
 | `PIPEZ_LEAF_RETRIES` / `PIPEZ_FIX_ROUNDS` | 1 / 2 | extra attempts for a failed code task; fixer rounds when integration fails |
 | `PIPEZ_INTEGRATE_TIMEOUT` | 1800 | timeout (s) for each integrator build / test command |
 | `PIPEZ_DEPLOY_AUTO` / `PIPEZ_DEPLOY_HEALTH_TIMEOUT` | 1 / 180 | auto-deploy after a successful VM-hosted run; health wait (s) |
-| `PIPEZ_PVE_DEPLOY_TEMPLATE` / `PIPEZ_PVE_DEPLOY_VMID_RANGE` | 9000 / 9200-9299 | template (plain Ubuntu, not the builder) and VMIDs for deploy VMs |
+| `PIPEZ_DEPLOY_TTL_HOURS` / `PIPEZ_DEPLOY_SWEEP_SECONDS` / `PIPEZ_DEPLOY_REPLACE` | 72 / 3600 / 1 | ready deployments are undeployed after this many hours unless kept (0 = never); expiry pass interval (s); a newly ready deployment undeploys its project's other ready, non-kept ones (`PUT /api/runs/{id}/deployment/keep`, `POST /api/deployments/expire`) |
+| `PIPEZ_PVE_DEPLOY_TEMPLATE` / `PIPEZ_PVE_DEPLOY_VMID_RANGE` | 9000 / 9200-9299 | template (plain Ubuntu, not the builder) and VMIDs for deploy VMs; set `PIPEZ_PVE_DEPLOY_TEMPLATE=9002` (pipez-app-base, guest agent preinstalled; build with `infra/pve/make-app-template.sh`) to avoid the >240 s apt wait |
 | `PIPEZ_SANDBOX_KEEP` | 0 | 1 = mock sandbox temp dirs survive teardown (debug) |
 | `PIPEZ_DB` | `./pipez.sqlite3` | |
 | `PIPEZ_ARTIFACTS_DIR` | `./artifacts` | |
@@ -102,7 +103,7 @@ After plan approval each run owns one sandbox. Run states now include `provision
 - `pipez/pve.py` `ProxmoxClient` (scoped API token; VMs enumerated via `GET /pools/{pool}`; 5xx/transport errors retried 3 times then `PveTransientError`, 4xx is `PveError`). `pipez/sandbox.py`: `PveSandbox` linked-clones the template into pool `pipez` (`pipez-<run_id>`), injects `~/.ssh/pipez_ed25519.pub`, boots, finds the IPv4 via the guest agent, waits for SSH, creates `/work/<run_id>`. `run`/`put`/`get` use the `ssh` binary. Env keys ending `_KEY`/`SECRET`/`TOKEN` go to `/work/<run_id>/.env` (mode 600) and are sourced, never put on the command line. `MockSandbox` uses a local temp dir (used when `PIPEZ_MOCK=1` or `PIPEZ_SANDBOX=mock`).
 - Teardown: destroyed when the run is `done`; kept (VM left running, `sandbox_kept` logged on `run:<id>` with vmid/ip) when it fails, so you can `ssh etl@<ip>`. `resume` reuses a kept sandbox if it is still running, otherwise provisions a new one. Table `sandboxes` statuses: `provisioning|ready|destroying|destroyed|kept|failed`.
 - API: `GET /api/sandboxes`, `GET /api/runs/{id}/sandbox`, `POST /api/sandboxes/{run_id}/destroy` (kept/failed only). SSE: `{"type":"sandbox","run_id","sandbox"}` on each change; snapshot has `sandbox` per run. The UI run header shows `sandbox vmid · ip · status` with a destroy button when kept.
-- Config: `PIPEZ_SANDBOX` (`pve|mock`), `PIPEZ_SANDBOX_BOOT_TIMEOUT` (240), `PIPEZ_SSH_KEY`, `PIPEZ_SANDBOX_KEEP_ON_FAILURE` (1), `PIPEZ_PVE_URL/TOKEN_ID/TOKEN_SECRET/NODE/POOL/TEMPLATE/VMID_RANGE/VERIFY_TLS`. The token secret is read only in `config.py`.
+- Config: `PIPEZ_SANDBOX` (`pve|mock`), `PIPEZ_SANDBOX_BOOT_TIMEOUT` (240), `PIPEZ_DEPLOY_BOOT_TIMEOUT` (600, deploy VM guest-agent wait), `PIPEZ_SSH_KEY`, `PIPEZ_SANDBOX_KEEP_ON_FAILURE` (1), `PIPEZ_PVE_URL/TOKEN_ID/TOKEN_SECRET/NODE/POOL/TEMPLATE/VMID_RANGE/VERIFY_TLS`. The token secret is read only in `config.py`.
 
 ## Code tasks
 

@@ -188,12 +188,21 @@ PVE_VERIFY_TLS = os.environ.get("PIPEZ_PVE_VERIFY_TLS", "1") == "1"
 # pve|mock; mock whenever PIPEZ_MOCK=1.
 SANDBOX = os.environ.get("PIPEZ_SANDBOX", "mock" if MOCK else "pve")
 SANDBOX_BOOT_TIMEOUT = float(os.environ.get("PIPEZ_SANDBOX_BOOT_TIMEOUT", "240"))
+DEPLOY_BOOT_TIMEOUT = float(os.environ.get("PIPEZ_DEPLOY_BOOT_TIMEOUT", "600"))
 SSH_KEY = os.path.expanduser(os.environ.get("PIPEZ_SSH_KEY", "~/.ssh/pipez_ed25519"))
 SANDBOX_KEEP_ON_FAILURE = os.environ.get("PIPEZ_SANDBOX_KEEP_ON_FAILURE", "1") == "1"
 
 # Orphan sweep (task 15): destroy pool VMs in the sandbox/deploy ranges that no DB
 # row tracks. Off: they are only reported.
 SWEEP_DESTROY = os.environ.get("PIPEZ_SWEEP_DESTROY", "0") == "1"
+
+# Deploy hygiene (task 23): ready deployments are undeployed after this many hours
+# unless kept (0 = never expire); the expiry pass runs every DEPLOY_SWEEP_SECONDS.
+# DEPLOY_REPLACE: a newly ready deployment undeploys its project's other ready,
+# non-kept deployments.
+DEPLOY_TTL_HOURS = float(os.environ.get("PIPEZ_DEPLOY_TTL_HOURS", "72"))
+DEPLOY_SWEEP_SECONDS = float(os.environ.get("PIPEZ_DEPLOY_SWEEP_SECONDS", "3600"))
+DEPLOY_REPLACE = os.environ.get("PIPEZ_DEPLOY_REPLACE", "1") != "0"
 
 # Debug: keep mock sandbox temp dirs after teardown (inspect repo/worktrees).
 SANDBOX_KEEP = os.environ.get("PIPEZ_SANDBOX_KEEP", "0") == "1"

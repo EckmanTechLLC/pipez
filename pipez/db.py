@@ -152,6 +152,8 @@ MIGRATIONS = [
         retired_at REAL
     )""",
     "ALTER TABLE runs ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE deployments ADD COLUMN keep INTEGER DEFAULT 0",
+    "ALTER TABLE deployments ADD COLUMN expires_at REAL",
     """CREATE TABLE IF NOT EXISTS spend (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id        TEXT NOT NULL,
@@ -284,7 +286,8 @@ class Database:
     # -- deployments --------------------------------------------------------
 
     DEPLOYMENT_FIELDS = ("vmid", "name", "ip", "url", "status", "created_at",
-                         "ready_at", "destroyed_at", "error", "log")
+                         "ready_at", "destroyed_at", "error", "log", "keep",
+                         "expires_at")
 
     def upsert_deployment(self, run_id, **fields):
         bad = set(fields) - set(self.DEPLOYMENT_FIELDS)

@@ -513,6 +513,39 @@ class Engine:
         self._publish_run(run_id)
         self._publish_plan(run_id)
 
+    def _seed_bundle(self, run: dict):
+        """Path of the parent's repo bundle when `run` is a child of a plan
+        run that produced one, else None."""
+        parent = run.get("parent_run_id")
+        if not parent:
+            return None
+        path = os.path.join(config.ARTIFACTS_DIR, parent, "repo-%s.bundle" % parent)
+        return path if os.path.isfile(path) else None
+
+    def _existing_repo_section(self, run: dict) -> str:
+        """The `# Existing repository` plan-prompt section for a child run
+        whose workspace is seeded from its parent's bundle ('' otherwise)."""
+        if not self._seed_bundle(run):
+            return ""
+        parent = run["parent_run_id"]
+        pplan = (self.db.get_run(parent) or {}).get("plan") or {}
+        lines = [
+            "# Existing repository",
+            "The repository from the prior run %s is ALREADY present in the "
+            "workspace at branch `main` (tag `pipez/%s`). Plan an increment on "
+            "top of it." % (parent, parent),
+            "Parent stack: %s" % (", ".join(pplan.get("stack") or []) or "(unknown)"),
+            "Parent repo layout:\n%s" % (pplan.get("repo_layout") or "(unknown)"),
+            "Do NOT re-scaffold: no `git init`, `npm init` or `git checkout` of "
+            "tags. scaffold_commands may only install dependencies (e.g. `npm ci`) "
+            "and create new directories.",
+        ]
+        if pplan.get("build_command"):
+            lines.append("Parent build_command: %s" % pplan["build_command"])
+        if pplan.get("test_command"):
+            lines.append("Parent test_command: %s" % pplan["test_command"])
+        return "\n".join(lines)
+
     async def _plan(self, run_id: str):
         """Planning: the deep tier turns the brief into architecture, module
         contracts and a task DAG; the run then pauses as awaiting_plan."""
@@ -529,6 +562,9 @@ class Engine:
             if run.get("context"):
                 parts.append("# Project context\n%s" % run["context"])
             parts.append("# Build brief (binding)\n%s" % run.get("brief"))
+            existing = self._existing_repo_section(run)
+            if existing:
+                parts.append(existing)
             system += "\n\nAllowed tiers: %s." % ", ".join(config.offered_tiers("plan"))
             if run.get("plan") and revisions:
                 parts.append("# Previous plan\n%s"
@@ -1199,8 +1235,10 @@ class Engine:
                            lambda ev, d: self.db.log(key, ev, d), note)
             url = await dep.run()
             self.db.upsert_deployment(run_id, status="ready", url=url, ip=sb.ip,
-                                      ready_at=time.time(), error=None)
+                                      ready_at=time.time(), error=None,
+                                      expires_at=self._expiry(False))
             self.db.log(key, "deploy_ok", {"url": url, "vmid": sb.vmid})
+            await self.replace_deployments(run_id)
         except asyncio.CancelledError:
             await self._abort_deploy(run_id, "stopped by user")
             raise
@@ -1223,6 +1261,66 @@ class Engine:
                 self.db.set_run_status(run_id, nxt)
             self._publish_run(run_id)
             self._publish_deployment(run_id)
+
+    @staticmethod
+    def _expiry(keep: bool):
+        if keep or not config.DEPLOY_TTL_HOURS:
+            return None
+        return time.time() + config.DEPLOY_TTL_HOURS * 3600
+
+    def set_deploy_keep(self, run_id: str, keep: bool) -> dict:
+        if not self.db.get_deployment(run_id):
+            raise ValueError("no such deployment")
+        row = self.db.upsert_deployment(run_id, keep=1 if keep else 0,
+                                        expires_at=self._expiry(keep))
+        self.db.log("run:" + run_id, "deploy_keep", {"keep": bool(keep)})
+        self._publish_deployment(run_id)
+        return row
+
+    async def expire_deployments(self) -> list:
+        """Undeploy ready, non-kept deployments past their expiry."""
+        report = []
+        now = time.time()
+        for row in self.db.list_deployments():
+            if (row["status"] != "ready" or row.get("keep")
+                    or row.get("expires_at") is None or row["expires_at"] >= now):
+                continue
+            rid = row["run_id"]
+            try:
+                await self.undeploy(rid)
+                self.db.log("run:" + rid, "deploy_expired",
+                            {"expires_at": row["expires_at"], "vmid": row["vmid"]})
+                report.append({"run_id": rid, "expired": True})
+            except Exception as e:
+                logger.warning("expiring deployment of run %s failed: %s", rid, e)
+                self.db.log("run:" + rid, "deploy_expire_failed", {"error": str(e)})
+                report.append({"run_id": rid, "expired": False, "error": str(e)})
+        return report
+
+    async def replace_deployments(self, run_id: str) -> list:
+        """A ready deployment replaces its project's other ready, non-kept ones."""
+        if not config.DEPLOY_REPLACE:
+            return []
+        dep = self.db.get_deployment(run_id)
+        run = self.db.get_run(run_id)
+        if not dep or dep["status"] != "ready" or not run:
+            return []
+        replaced = []
+        for row in self.db.list_deployments():
+            other = row["run_id"]
+            if other == run_id or row["status"] != "ready" or row.get("keep"):
+                continue
+            orun = self.db.get_run(other)
+            if not orun or orun.get("project_id") != run.get("project_id"):
+                continue
+            try:
+                await self.undeploy(other)
+                replaced.append(other)
+            except Exception as e:
+                logger.warning("replacing deployment of run %s failed: %s", other, e)
+        if replaced:
+            self.db.log("run:" + run_id, "deploy_replaced", {"replaced": replaced})
+        return replaced
 
     async def undeploy(self, run_id: str) -> dict:
         row = self.db.get_deployment(run_id)
@@ -1349,11 +1447,18 @@ class Engine:
             return
         await self._run_resume(run_id, root)
         # Order: deploy -> acceptance review (needs the live sandbox) -> release.
+        deploy_failed = None
         if self.db.get_run(run_id)["status"] == "deploying":
             await self._deploy(run_id, review=True)
+            dep = self.db.get_deployment(run_id)
+            if self._deploy_spec(run_id) and (not dep or dep["status"] != "ready"):
+                deploy_failed = (dep or {}).get("error") or (
+                    "deployment is %s" % (dep["status"] if dep else "absent"))
         if (self.db.get_run(run_id)["status"] in ("done", "verifying")
                 and self._build_done(run_id)):
-            if config.VERIFY_AUTO:
+            if config.VERIFY_AUTO and deploy_failed is not None:
+                self._review_error(run_id, "deployment failed: %s" % deploy_failed)
+            elif config.VERIFY_AUTO:
                 await self._review_with_fixes(run_id, root)
             else:
                 self._review_skipped(run_id, "PIPEZ_VERIFY_AUTO is off")
@@ -1386,6 +1491,14 @@ class Engine:
         self.db.set_run_verification(run_id, "skipped")
         self._publish_run(run_id)
         return "skipped"
+
+    def _review_error(self, run_id: str, reason: str) -> str:
+        """The review could not run for a reason that needs a human (e.g. the
+        deployment failed): flag the run `error` so the sandbox is kept."""
+        self.db.log("run:" + run_id, "review_error", {"reason": reason})
+        self.db.set_run_verification(run_id, "error")
+        self._publish_run(run_id)
+        return "error"
 
     def _publish_verifications(self, run_id: str):
         self.bus.publish({"type": "verification", "run_id": run_id,
@@ -1533,6 +1646,8 @@ class Engine:
                              % (dep["status"] if dep else "absent"))
         if self._alive(run_id):
             raise ValueError("run is busy")
+        if self._sandboxes.get(run_id) is None:
+            raise ValueError("the build sandbox is kept but not attached (server restarted)")
         self.db.set_run_status(run_id, "verifying")
         self._publish_run(run_id)
         self._spawn(self._reverify(run_id, row), run_id)
@@ -1813,16 +1928,39 @@ class Engine:
             self.db.log(key, "workspace_reused", {"repo": repo})
             return
         q = shlex.quote
-        steps = [
-            "rm -rf %s && mkdir -p %s %s/logs %s/wt" % (q(repo), q(repo), q(wd), q(wd)),
-            "git init -q -b main",
-            "git config user.name pipez && git config user.email pipez@local",
-            "printf '.pipez/\\n.venv\\nnode_modules\\n__pycache__/\\n.pytest_cache/\\n' >> .git/info/exclude",
-        ]
-        for i, cmd in enumerate(steps):
-            r = await sb.run(cmd, cwd=wd if i == 0 else repo)
-            if r["rc"]:
-                raise ScaffoldError("scaffold_failed: %s: %s" % (cmd, self._tail(r["stderr"])))
+        bundle = self._seed_bundle(run)
+        parent = run.get("parent_run_id")
+        if bundle:
+            bad = [c for c in plan.get("scaffold_commands") or []
+                   if re.search(r"(^|&&|;|\|\|)\s*(git\s+(init|checkout|clone)\b|npm\s+init\b)", c)]
+            if bad:
+                self.db.log(key, "scaffold_filtered", {"cmds": bad})
+                raise ScaffoldError("scaffold_failed: '%s' is not allowed on a seeded workspace"
+                                    % bad[0])
+        elif parent:
+            self.db.log(key, "workspace_seed_missing", {
+                "parent": parent,
+                "bundle": os.path.join(config.ARTIFACTS_DIR, parent, "repo-%s.bundle" % parent)})
+        excl = "printf '.pipez/\\n.venv\\nnode_modules\\n__pycache__/\\n.pytest_cache/\\n' >> .git/info/exclude"
+        cfg = "git config user.name pipez && git config user.email pipez@local"
+        mk = "rm -rf %s && mkdir -p %s %s/logs %s/wt" % (q(repo), q(repo), q(wd), q(wd))
+        if bundle:
+            with open(bundle, "rb") as f:
+                data = f.read()
+            steps = [(mk, wd)]
+            await self._run_steps(sb, steps)
+            await sb.put("%s/parent.bundle" % wd, data)
+            await self._run_steps(sb, [
+                ("git clone -q %s %s" % (q("%s/parent.bundle" % wd), q(repo)), wd),
+                ("git checkout -q main || true", repo),
+                (cfg, repo), (excl, repo)])
+            h = await sb.run("git rev-parse HEAD", cwd=repo)
+            self.db.log(key, "workspace_seeded", {
+                "parent": parent, "bundle": os.path.basename(bundle),
+                "head": h["stdout"].strip()})
+        else:
+            await self._run_steps(sb, [(mk, wd), ("git init -q -b main", repo),
+                                       (cfg, repo), (excl, repo)])
         for cmd in plan.get("scaffold_commands") or []:
             r = await sb.run(cmd, cwd=repo, timeout=600)
             self.db.log(key, "scaffold", {"cmd": cmd, "rc": r["rc"], "seconds": r["seconds"],
@@ -1835,9 +1973,16 @@ class Engine:
         if r["rc"]:     # the scaffold did not create one: write the baseline
             await sb.put("%s/.gitignore" % repo, BASELINE_GITIGNORE)
             self.db.log(key, "gitignore_baseline", {})
-        for cmd in ["git add -A", "git commit -q --allow-empty -m scaffold",
-                    "git branch integration", "git checkout -q integration"]:
-            r = await sb.run(cmd, cwd=repo)
+        msg = "scaffold (child of %s)" % parent if bundle else "scaffold"
+        await self._run_steps(sb, [
+            ("git add -A", repo),
+            ("git commit -q --allow-empty -m %s" % q(msg), repo),
+            ("git checkout -q -B integration" if bundle else "git branch integration", repo)]
+            + ([] if bundle else [("git checkout -q integration", repo)]))
+
+    async def _run_steps(self, sb, steps):
+        for cmd, cwd in steps:
+            r = await sb.run(cmd, cwd=cwd)
             if r["rc"]:
                 raise ScaffoldError("scaffold_failed: %s: %s" % (cmd, self._tail(r["stderr"])))
 

@@ -41,8 +41,21 @@ Picks the first free VMID in `PIPEZ_PVE_VMID_RANGE` not in `/pools/pipez`, linke
 agent, SSHes in as `etl`, runs `claude --version`, `docker ps`, the SDK import and prints the
 marker file, then stops and destroys the clone. Prints clone-to-SSH-ready seconds.
 
+## pipez-app-base (9002)
+Deploy VMs (`pipez-app-<run>`, 9200-9299) used to clone plain 9000, whose vendor snippet
+re-ran `apt` on every clone, so the guest agent (how pipez learns the IP) appeared only
+after >240 s. 9002 bakes that in once: `qemu-guest-agent`, python3, python3-venv,
+python3-pip, curl, ca-certificates, rsync, gnupg. No zellij/ttyd.
+- `make-app-template.sh [--force]` - clones 9000 -> 9002 (2 cores, 2 GB), boots with
+  `pipez-app-vendor.yaml` (bake-time), waits for cloud-init, verifies the agent and
+  `python3 -m venv`, cleans cloud-init state, swaps in `pipez-app-clone-vendor.yaml`
+  (installs nothing, just enables the agent), converts to a template. Refuses if 9002
+  exists unless `--force`. Never touches 9000/9001/9090 or 91xx/92xx VMs.
+- Rebuild: `infra/pve/make-app-template.sh --force`
+- Use it: set `PIPEZ_PVE_DEPLOY_TEMPLATE=9002` in `.env`.
+
 ## VMID conventions
-- 9000 ubuntu-base, 9001 pipez-builder (templates)
+- 9000 ubuntu-base, 9001 pipez-builder, 9002 pipez-app-base (templates)
 - 9100-9199 per-run sandboxes (linked clones)
 - 9200-9299 reserved for deployed apps
 
