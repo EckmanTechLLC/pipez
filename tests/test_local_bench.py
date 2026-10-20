@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -123,7 +124,7 @@ def test_bench_dry_run(monkeypatch, tmp_path, capsys):
 
 
 def test_intake_tier_default_and_validation(monkeypatch):
-    assert config.INTAKE_TIER == "deep"
+    assert config.INTAKE_TIER == config.valid_tier(os.environ.get("PIPEZ_INTAKE_TIER", "deep"))
     assert config.valid_tier("standard") == "standard"
     assert config.valid_tier("nonsense") == "deep"
 
@@ -262,8 +263,12 @@ async def test_plan_revision_uses_revision_tier_and_effort(monkeypatch, tmp_path
 
 
 def test_plan_revision_config_defaults():
-    assert config.PLAN_REVISION_TIER == "deep"
-    assert config.PLAN_REVISION_EFFORT == config.PLAN_EFFORT
+    assert config.PLAN_REVISION_TIER == config.valid_tier(
+        os.environ.get("PIPEZ_PLAN_REVISION_TIER", "deep"))
+    assert config.PLAN_REVISION_TIER in config.MODEL_TIERS
+    assert config.PLAN_REVISION_EFFORT == (
+        os.environ.get("PIPEZ_PLAN_REVISION_EFFORT") or config.PLAN_EFFORT)
+    assert isinstance(config.PLAN_REVISION_EFFORT, str) and config.PLAN_REVISION_EFFORT
 
 
 def test_bench_plan_dry_run(monkeypatch, tmp_path, capsys):

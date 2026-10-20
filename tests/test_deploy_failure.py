@@ -1,5 +1,6 @@
 """Deploy failure inside a plan run (task 20): run flagged, sandbox kept, redeploy + reverify."""
 import json
+import shutil
 
 import pytest
 
@@ -61,7 +62,7 @@ async def test_manual_deploy_then_reverify(flaky):
     await settle(db, rid)
     d = db.get_deployment(rid)
     assert d["status"] == "ready", d["error"]
-    assert engine.reverify(rid)["status"] == "verifying"
+    assert (await engine.reverify(rid))["status"] == "verifying"
     for _ in range(3000):
         if db.get_run(rid)["status"] == "done":
             break
@@ -72,7 +73,7 @@ async def test_manual_deploy_then_reverify(flaky):
     await engine.undeploy(rid)
 
 
-async def test_reverify_refuses_unattached_sandbox(flaky):
+async def test_reverify_refuses_gone_sandbox(flaky):
     db, engine, cfg, marker = flaky
     rid, run = await run_plan(db, engine)
     marker.write_text("1")
@@ -80,8 +81,9 @@ async def test_reverify_refuses_unattached_sandbox(flaky):
     await settle(db, rid)
     assert db.get_deployment(rid)["status"] == "ready"
     engine._sandboxes.pop(rid, None)
-    with pytest.raises(ValueError, match="not attached"):
-        engine.reverify(rid)
+    shutil.rmtree(db.get_sandbox(rid)["name"], ignore_errors=True)
+    with pytest.raises(ValueError, match="sandbox is gone"):
+        await engine.reverify(rid)
     await engine.undeploy(rid)
 
 

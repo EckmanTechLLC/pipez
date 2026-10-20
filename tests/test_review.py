@@ -41,7 +41,7 @@ async def test_auto_review_passes(dep):
     assert events(db, rid, "review_done")[0]["verification"] == "passed"
     # the sandbox is gone, so a manual re-verify is refused
     with pytest.raises(ValueError, match="sandbox"):
-        engine.reverify(rid)
+        await engine.reverify(rid)
     await engine.undeploy(rid)
 
 
@@ -82,7 +82,7 @@ async def test_wrong_verdict_fails_flag_keeps_sandbox(dep, monkeypatch):
     verdicts = json.loads(db.get_verifications(rid)[0]["verdicts"])
     assert [v["verdict"] for v in verdicts] == ["wrong"] and verdicts[0]["correction"]
     # manual re-verify runs the review again on the kept sandbox
-    assert engine.reverify(rid)["status"] == "verifying"
+    assert (await engine.reverify(rid))["status"] == "verifying"
     for _ in range(3000):
         if db.get_run(rid)["status"] == "done":
             break

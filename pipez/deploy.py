@@ -156,12 +156,47 @@ class Deployer:
             raise DeployError("%s failed (rc %s): %s" % (what, r["rc"], out))
         return r
 
+    async def _wait_ready(self, cloud_init: bool = True):
+        """Wait (bounded) for cloud-init and for apt/dpkg locks to be free. A
+        timeout is logged, never fatal: the install command fails loudly itself."""
+        if self.mock:
+            self.emit("deploy_wait_ready", {"seconds": 0, "cloud_init_rc": None,
+                                            "timed_out": False})
+            return
+        total = config.DEPLOY_READY_TIMEOUT
+        t0 = time.monotonic()
+        rc = None
+        if cloud_init:
+            r = await self.sb.run(
+                "timeout %d cloud-init status --wait >/dev/null 2>&1; echo cloud-init:$?"
+                % max(1, int(total)), timeout=total + 60)
+            m = re.search(r"cloud-init:(\d+)", r["stdout"])
+            rc = int(m.group(1)) if m else None
+        left = max(1, int(total - (time.monotonic() - t0)))
+        r = await self.sb.run(
+            "end=$(( $(date +%%s) + %d )); "
+            "while sudo fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock "
+            "/var/lib/dpkg/lock-frontend >/dev/null 2>&1 "
+            "|| pgrep -x 'apt-get|apt|dpkg' >/dev/null 2>&1; do "
+            "if [ $(date +%%s) -ge $end ]; then echo locks:timeout; break; fi; sleep 2; done; "
+            "sudo systemctl is-active apt-daily.service apt-daily-upgrade.service 2>&1 || true"
+            % left, timeout=left + 60)
+        out = (r["stdout"] + r["stderr"]).strip()
+        secs = round(time.monotonic() - t0, 1)
+        timed_out = "locks:timeout" in out or rc == 124
+        self.emit("deploy_wait_ready", {"seconds": secs, "cloud_init_rc": rc,
+                                        "timed_out": timed_out})
+        self.note("waited %ds for cloud-init / apt locks%s" % (
+            int(secs), " (timed out, continuing)" if timed_out else ""))
+
     async def run(self) -> str:
         sb, d, app = self.sb, self.deploy, self.app
         self.report("provisioning")
         await sb.provision()
         self.report("provisioning", vmid=sb.vmid, name=sb.name, ip=sb.ip)
         self.note("provisioned %s ip=%s" % (sb.name, sb.ip))
+
+        await self._wait_ready()
 
         self.report("installing")
         with open(self.tarball, "rb") as f:
@@ -188,6 +223,12 @@ class Deployer:
                 continue
             r = await sb.run(cmd, cwd=appdir, timeout=1800)
             tail = self._tail((r["stdout"] + r["stderr"]).strip())
+            if r["rc"] == 100 and ("Could not get lock" in tail or "Unable to lock" in tail):
+                self.emit("deploy_install_retry", {"cmd": cmd, "rc": r["rc"], "tail": tail})
+                self.note("$ %s (rc 100, apt lock held; waiting and retrying once)" % cmd)
+                await self._wait_ready(cloud_init=False)
+                r = await sb.run(cmd, cwd=appdir, timeout=1800)
+                tail = self._tail((r["stdout"] + r["stderr"]).strip())
             self.emit("deploy_install", {"cmd": cmd, "rc": r["rc"],
                                          "seconds": r["seconds"], "tail": tail})
             self.note("$ %s (rc %s)%s" % (cmd, r["rc"], "\n" + tail if tail else ""))

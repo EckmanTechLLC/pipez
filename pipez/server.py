@@ -340,7 +340,7 @@ async def verify(run_id: str):
     run = db.get_run(run_id)
     if run and run.get("plan"):         # acceptance review of the live deployment
         try:
-            engine.reverify(run_id)
+            await engine.reverify(run_id)
         except ValueError as e:
             raise HTTPException(400, str(e))
         return {"started": True}

@@ -192,6 +192,8 @@ PVE_VERIFY_TLS = os.environ.get("PIPEZ_PVE_VERIFY_TLS", "1") == "1"
 SANDBOX = os.environ.get("PIPEZ_SANDBOX", "mock" if MOCK else "pve")
 SANDBOX_BOOT_TIMEOUT = float(os.environ.get("PIPEZ_SANDBOX_BOOT_TIMEOUT", "240"))
 DEPLOY_BOOT_TIMEOUT = float(os.environ.get("PIPEZ_DEPLOY_BOOT_TIMEOUT", "600"))
+# Max wait for cloud-init and apt/dpkg locks on a fresh deploy VM before install commands.
+DEPLOY_READY_TIMEOUT = float(os.environ.get("PIPEZ_DEPLOY_READY_TIMEOUT", "600"))
 SSH_KEY = os.path.expanduser(os.environ.get("PIPEZ_SSH_KEY", "~/.ssh/pipez_ed25519"))
 SANDBOX_KEEP_ON_FAILURE = os.environ.get("PIPEZ_SANDBOX_KEEP_ON_FAILURE", "1") == "1"
 

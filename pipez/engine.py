@@ -983,6 +983,13 @@ class Engine:
                 self._sandbox_row(rid, status="destroyed", destroyed_at=time.time(),
                                   kept=0, error=self.INTERRUPTED)
             out["sandboxes"].append({"run_id": rid, "kept": alive})
+        # rows already `kept` before this restart: re-attach their handles
+        for row in self.db.list_sandboxes():
+            rid = row["run_id"]
+            if row["status"] != "kept" or rid in self._sandboxes or self._alive(rid):
+                continue
+            out["sandboxes"].append({"run_id": rid,
+                                     "attached": await self._attach_kept(rid) is not None})
         for row in self.db.list_deployments():
             rid = row["run_id"]
             if row["status"] not in ("provisioning", "installing", "starting") \
@@ -1367,15 +1374,47 @@ class Engine:
         self.bus.publish({"type": "sandbox", "run_id": run_id, "sandbox": row})
         return row
 
+    async def _attach_kept(self, run_id: str):
+        """Handle of a `kept` build sandbox, re-adopted from its DB row after a
+        server restart. None when there is no such row, the kind differs, the
+        VM is gone (row -> destroyed) or the check failed."""
+        sb = self._sandboxes.get(run_id)
+        if sb is not None:
+            return sb
+        key = "run:" + run_id
+        try:
+            row = self.db.get_sandbox(run_id)
+            if not row or row["status"] != "kept":
+                return None
+            sb = self._sandbox_factory(run_id)
+            if row["kind"] != sb.kind:
+                logger.warning("attach: sandbox of run %s is %s, not %s",
+                               run_id, row["kind"], sb.kind)
+                return None
+            sb.adopt(row)
+            alive = bool(row.get("vmid") or row["kind"] == "mock") and await sb.alive()
+            if alive:
+                self._sandboxes[run_id] = sb
+                self.db.log(key, "sandbox_attached", {"vmid": row["vmid"], "ip": row["ip"]})
+                return sb
+            self._sandbox_row(run_id, status="destroyed", destroyed_at=time.time(),
+                              kept=0, error="kept sandbox is gone")
+            self.db.log(key, "sandbox_gone", {"vmid": row["vmid"], "ip": row["ip"]})
+        except Exception as e:  # noqa: BLE001
+            logger.warning("attach: kept sandbox of run %s failed: %s", run_id, e)
+            try:
+                self.db.log(key, "sandbox_attach_failed", {"error": str(e)})
+            except Exception:  # noqa: BLE001
+                pass
+        return None
+
     async def _acquire_sandbox(self, run_id: str):
         """Reuse a kept sandbox if it is still alive, else provision one."""
         old = self.db.get_sandbox(run_id)
         if old and old["status"] == "kept":
-            sb = self._sandboxes.get(run_id)
-            if sb is None:
-                sb = self._sandbox_factory(run_id)
-                sb.adopt(old)
-            if old["kind"] == sb.kind and await sb.alive():
+            # resume path: re-attach the kept sandbox if it is still there
+            sb = await self._attach_kept(run_id)
+            if sb is not None:
                 self._sandbox_row(run_id, status="ready", kept=0, error=None)
                 self.db.log("run:" + run_id, "sandbox_reused",
                             {"vmid": old["vmid"], "ip": old["ip"]})
@@ -1421,9 +1460,14 @@ class Engine:
             raise ValueError("sandbox is %s, only kept or failed ones can be destroyed"
                              % row["status"])
         if run_id not in self._sandboxes:
-            sb = self._sandbox_factory(run_id)
-            sb.adopt(row)
-            self._sandboxes[run_id] = sb
+            if row["status"] == "kept":
+                await self._attach_kept(run_id)
+                if run_id not in self._sandboxes:       # gone: row already destroyed
+                    return self.db.get_sandbox(run_id)
+            else:
+                sb = self._sandbox_factory(run_id)
+                sb.adopt(row)
+                self._sandboxes[run_id] = sb
         await self._release_sandbox(run_id, keep=False)
         return self.db.get_sandbox(run_id)
 
@@ -1645,7 +1689,7 @@ class Engine:
         self._publish_run(run_id)
         return verification
 
-    def reverify(self, run_id: str) -> dict:
+    async def reverify(self, run_id: str) -> dict:
         """Re-run the acceptance review of a done plan run whose build sandbox
         is still around. ValueError (-> 400) names the reason otherwise."""
         run = self.db.get_run(run_id)
@@ -1665,8 +1709,8 @@ class Engine:
                              % (dep["status"] if dep else "absent"))
         if self._alive(run_id):
             raise ValueError("run is busy")
-        if self._sandboxes.get(run_id) is None:
-            raise ValueError("the build sandbox is kept but not attached (server restarted)")
+        if await self._attach_kept(run_id) is None and self._sandboxes.get(run_id) is None:
+            raise ValueError("the build sandbox is gone (vm not reachable)")
         self.db.set_run_status(run_id, "verifying")
         self._publish_run(run_id)
         self._spawn(self._reverify(run_id, row), run_id)
