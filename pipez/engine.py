@@ -546,6 +546,38 @@ class Engine:
             lines.append("Parent test_command: %s" % pplan["test_command"])
         return "\n".join(lines)
 
+    @staticmethod
+    def _is_revision(run: dict) -> bool:
+        """True when `run` carries a previous plan and a human revision note."""
+        revisions = (run.get("plan_meta") or {}).get("revisions") or []
+        return bool(run.get("plan") and revisions)
+
+    def _plan_prompt(self, run: dict) -> tuple:
+        """(system, prompt) of the plan call; includes the previous plan and
+        the last human note when `run` is a revision."""
+        meta = run.get("plan_meta") or {}
+        revisions = meta.get("revisions") or []
+        system = (self.db.get_prompt("plan_architect") or "") + (
+            "\n\nHARD LIMITS: at most %d tasks and at most %d modules. "
+            "Merge small tasks; a task is a unit one engineer completes "
+            "in one sitting, not a function."
+            % (config.PLAN_MAX_TASKS, config.PLAN_MAX_MODULES))
+        parts = ["# Original request\n%s" % run["request"]]
+        if run.get("context"):
+            parts.append("# Project context\n%s" % run["context"])
+        parts.append("# Build brief (binding)\n%s" % run.get("brief"))
+        existing = self._existing_repo_section(run)
+        if existing:
+            parts.append(existing)
+        system += "\n\nAllowed tiers: %s." % ", ".join(config.offered_tiers("plan"))
+        if run.get("plan") and revisions:
+            parts.append("# Previous plan\n%s"
+                         % json.dumps(run["plan"], indent=2))
+            parts.append("REVISION NOTE (from the human reviewer; revise "
+                         "the previous plan accordingly):\n%s"
+                         % revisions[-1]["note"])
+        return system, "\n\n".join(parts)
+
     async def _plan(self, run_id: str):
         """Planning: the deep tier turns the brief into architecture, module
         contracts and a task DAG; the run then pauses as awaiting_plan."""
@@ -553,30 +585,17 @@ class Engine:
             run = self.db.get_run(run_id)
             meta = run.get("plan_meta") or {}
             revisions = meta.get("revisions") or []
-            system = (self.db.get_prompt("plan_architect") or "") + (
-                "\n\nHARD LIMITS: at most %d tasks and at most %d modules. "
-                "Merge small tasks; a task is a unit one engineer completes "
-                "in one sitting, not a function."
-                % (config.PLAN_MAX_TASKS, config.PLAN_MAX_MODULES))
-            parts = ["# Original request\n%s" % run["request"]]
-            if run.get("context"):
-                parts.append("# Project context\n%s" % run["context"])
-            parts.append("# Build brief (binding)\n%s" % run.get("brief"))
-            existing = self._existing_repo_section(run)
-            if existing:
-                parts.append(existing)
-            system += "\n\nAllowed tiers: %s." % ", ".join(config.offered_tiers("plan"))
-            if run.get("plan") and revisions:
-                parts.append("# Previous plan\n%s"
-                             % json.dumps(run["plan"], indent=2))
-                parts.append("REVISION NOTE (from the human reviewer; revise "
-                             "the previous plan accordingly):\n%s"
-                             % revisions[-1]["note"])
-            prompt = "\n\n".join(parts)
+            system, prompt = self._plan_prompt(run)
+            revision = self._is_revision(run)
+            plan_tier = config.PLAN_REVISION_TIER if revision else "deep"
+            plan_effort = config.PLAN_REVISION_EFFORT if revision else config.PLAN_EFFORT
+            self.db.log("run:%s" % run_id, "plan_call",
+                        {"revision": revision, "tier": plan_tier,
+                         "effort": plan_effort})
             started = time.time()
             (out, usage), tier_name = await self._run_llm_call(
-                run_id, "deep", lambda tier: self.llm.plan(
-                    system, prompt, dict(tier, effort=config.PLAN_EFFORT)))
+                run_id, plan_tier, lambda tier: self.llm.plan(
+                    system, prompt, dict(tier, effort=plan_effort)))
             self._add_spend(run_id, None, "plan", usage)
             plan = self._validate_plan(run_id, out)
             warnings = []

@@ -12,6 +12,11 @@ against a reference tier called in the same run:
   python scripts/bench_local.py --db pipez.sqlite3 --stages intake \
       --tiers deep,standard --reference-tier deep \
       --request-files .odin/bench/requests --max-per-stage 0 --yes
+
+Plan stages (first plans and revision rounds) take tier@effort settings:
+
+  python scripts/bench_local.py --db pipez.sqlite3 --stages plan,plan_revision \
+      --tiers deep@high,deep@medium,standard --save-outputs --yes
 """
 import argparse
 import asyncio
@@ -32,7 +37,9 @@ from pipez.engine import Engine  # noqa: E402
 from pipez.events import EventBus  # noqa: E402
 from pipez.llm import LLM  # noqa: E402
 
-DEFAULT_OUT_TOKENS = {"intake": 3000, "brief": 2500}
+DEFAULT_OUT_TOKENS = {"intake": 3000, "brief": 2500, "plan": 20000,
+                      "plan_revision": 15000}
+PLAN_STAGES = ("plan", "plan_revision")
 
 
 def parse_args(argv=None):
@@ -41,7 +48,8 @@ def parse_args(argv=None):
     p.add_argument("--db", required=True, help="path to the pipez sqlite DB (read only)")
     p.add_argument("--runs", default="all", help="comma list of run ids, or 'all'")
     p.add_argument("--stages", default="intake,brief")
-    p.add_argument("--tiers", default="local,light,standard")
+    p.add_argument("--tiers", default="local,light,standard",
+                   help="comma list of name[@effort], e.g. deep@high,deep@medium,standard")
     p.add_argument("--out", default="bench", help="output directory")
     p.add_argument("--max-per-stage", type=int, default=2,
                    help="max runs replayed per stage (bounds spend)")
@@ -51,8 +59,11 @@ def parse_args(argv=None):
     p.add_argument("--project-id", default="bench",
                    help="project id used for synthetic requests (known keys)")
     p.add_argument("--reference-tier", default="",
-                   help="intake: call this tier first and score the other tiers "
-                        "against its output instead of the stored decisions")
+                   help="intake/plan stages: call this tier (name[@effort]) first and "
+                        "score the other tiers against its output instead of "
+                        "the stored answer")
+    p.add_argument("--save-outputs", action="store_true",
+                   help="store the raw output of every call in the JSON file")
     p.add_argument("--yes", action="store_true", help="proceed after the spend estimate")
     p.add_argument("--dry-run", action="store_true",
                    help="print the plan and estimate; make no calls")
@@ -78,6 +89,12 @@ def select_runs(db, stage: str, wanted, limit: int) -> list:
         if wanted is not None and r["id"] not in wanted:
             continue
         if not r.get("request"):
+            continue
+        if stage == "plan" and not (r.get("plan") and r.get("brief")):
+            continue
+        if stage == "plan_revision" and not (
+                r.get("plan") and r.get("brief")
+                and (r.get("plan_meta") or {}).get("revisions")):
             continue
         if stage == "brief" and not (r.get("decisions") and r.get("answers")):
             continue
@@ -107,16 +124,32 @@ def synthetic_runs(spec: str, project_id: str) -> list:
     return runs
 
 
+def parse_tier(spec: str) -> tuple:
+    """'name[@effort]' -> (name, effort or None)."""
+    name, _, effort = spec.partition("@")
+    return name, (effort or None)
+
+
+def tier_dict(spec: str) -> dict:
+    name, effort = parse_tier(spec)
+    tier = config.MODEL_TIERS[name]
+    return dict(tier, effort=effort) if effort else tier
+
+
 def build_prompt(engine, run: dict, stage: str) -> tuple:
     if stage == "intake":
         return engine._intake_prompt(run)
+    if stage == "plan":
+        return engine._plan_prompt(dict(run, plan=None))    # no revision branch
+    if stage == "plan_revision":
+        return engine._plan_prompt(run)
     return engine._brief_prompt(run)
 
 
 def estimate(tiers, prompt_chars, stage) -> float:
     total = 0.0
     for t in tiers:
-        tier = config.MODEL_TIERS.get(t)
+        tier = config.MODEL_TIERS.get(parse_tier(t)[0])
         if tier:
             total += config.estimate_cost(tier["model"], prompt_chars // 4,
                                           DEFAULT_OUT_TOKENS[stage])
@@ -147,6 +180,29 @@ def agreement_intake(out: dict, run: dict, reference: dict = None) -> dict:
             "locked_agree": _jaccard(set(out.get("request_values") or {}), locked_ref)}
 
 
+_SCAFFOLD_FORBIDDEN = re.compile(r"\bgit\s+(init|checkout|clone)\b|\bnpm\s+init\b")
+
+
+def agreement_plan(out: dict, run: dict, reference: dict = None) -> dict:
+    """Structure metrics of a plan output, compared with the stored plan or
+    with `reference` (another plan output) when given."""
+    base = reference if reference is not None else (run.get("plan") or {})
+    tasks = out.get("tasks") or []
+
+    def target(p):
+        return (p.get("deploy") or {}).get("target") or "none"
+
+    forbidden = bool(run.get("parent_run_id")) and any(
+        _SCAFFOLD_FORBIDDEN.search(str(c)) for c in out.get("scaffold_commands") or [])
+    return {"tasks": len(tasks), "modules": len(out.get("modules") or []),
+            "deploy_target": target(out),
+            "deploy_target_match": target(out) == target(base),
+            "task_count_delta": len(tasks) - len(base.get("tasks") or []),
+            "scaffold_forbidden": forbidden,
+            "has_test_command": bool((out.get("test_command") or "").strip()),
+            "plan_chars": len(json.dumps(out))}
+
+
 def _brief_text(out: dict) -> str:
     text = (out.get("brief") or "").rstrip()
     if out.get("constraints"):
@@ -165,10 +221,10 @@ def agreement_brief(out: dict, run: dict) -> dict:
 
 async def one_call(llm, stage, tier_name, system, prompt, run,
                    reference=None, is_reference=False, reference_tier=None,
-                   capture=None) -> dict:
+                   capture=None, save_output=False) -> dict:
     """One tier call. `reference` is the reference tier's output (None when it
     failed or is unused); `capture["out"]` receives this call's raw output."""
-    tier = config.MODEL_TIERS[tier_name]
+    tier = tier_dict(tier_name)
     rec = {"run_id": run["id"], "stage": stage, "tier": tier_name,
            "model": tier["model"]}
     if run.get("request_file"):
@@ -177,7 +233,7 @@ async def one_call(llm, stage, tier_name, system, prompt, run,
         rec["reference_tier"] = reference_tier
     started = time.time()
     try:
-        fn = llm.intake if stage == "intake" else llm.brief
+        fn = {"intake": llm.intake, "brief": llm.brief}.get(stage, llm.plan)
         out, usage = await fn(system, prompt, tier)
         rec.update(ok=True, schema_valid=True, seconds=round(time.time() - started, 2),
                    input_tokens=usage.get("input_tokens", 0),
@@ -186,7 +242,16 @@ async def one_call(llm, stage, tier_name, system, prompt, run,
                                            rec["input_tokens"], rec["output_tokens"])
         if capture is not None:
             capture["out"] = out
-        if stage == "intake" and is_reference:
+        if stage in PLAN_STAGES:
+            if is_reference:
+                rec["agreement"] = "reference"
+                rec.update(agreement_plan(out, run, {}))
+                rec["deploy_target_match"] = None
+                rec["task_count_delta"] = None
+            else:
+                rec.update(agreement_plan(out, run, reference))
+            rec["output"] = out
+        elif stage == "intake" and is_reference:
             rec["agreement"] = "reference"
         elif stage == "intake" and reference_tier:
             if reference is not None:
@@ -198,6 +263,8 @@ async def one_call(llm, stage, tier_name, system, prompt, run,
                 rec.update(agreement_intake(out, run))
         else:
             rec.update(agreement_brief(out, run))
+        if save_output and "output" not in rec:
+            rec["output"] = out
     except Exception as e:  # provider validates the schema; record any failure
         rec.update(ok=False, schema_valid=False, error=str(e)[:500],
                    seconds=round(time.time() - started, 2), cost=0.0)
@@ -213,7 +280,33 @@ def _fmt(x, f="%.2f"):
     return "-" if x is None else f % x
 
 
+def plan_table(results) -> str:
+    lines = ["| stage | tier | n | ok% | p50 s | mean $ | mean out-tok | tasks | Δtasks | deploy-match% | forbidden% |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for stage in PLAN_STAGES:
+        for tier in dict.fromkeys(r["tier"] for r in results if r["stage"] == stage):
+            rs = [r for r in results if r["stage"] == stage and r["tier"] == tier]
+            oks = [r for r in rs if r["ok"]]
+            dm = [1.0 if r["deploy_target_match"] else 0.0 for r in oks
+                  if r.get("deploy_target_match") is not None]
+            fb = [1.0 if r["scaffold_forbidden"] else 0.0 for r in oks]
+            lines.append("| %s | %s | %d | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                stage, tier, len(rs), _fmt(100 * len(oks) / len(rs), "%.0f"),
+                _fmt(statistics.median([r["seconds"] for r in rs]) if rs else None, "%.1f"),
+                _fmt(_mean([r["cost"] for r in rs]), "%.4f"),
+                _fmt(_mean([r.get("output_tokens") for r in oks]), "%.0f"),
+                _fmt(_mean([r.get("tasks") for r in oks]), "%.1f"),
+                _fmt(_mean([r.get("task_count_delta") for r in oks]), "%+.1f"),
+                _fmt(None if not dm else 100 * _mean(dm), "%.0f"),
+                _fmt(None if not fb else 100 * _mean(fb), "%.0f")))
+    return "\n".join(lines)
+
+
 def table(results) -> str:
+    plan_rs = [r for r in results if r["stage"] in PLAN_STAGES]
+    if plan_rs:
+        rest = [r for r in results if r["stage"] not in PLAN_STAGES]
+        return plan_table(plan_rs) + ("\n\n" + table(rest) if rest else "")
     lines = ["| stage | tier | n | ok% | p50 s | mean $ | key-Jaccard | locked-J | default-agree% | len ratio | headings% |",
              "|---|---|---|---|---|---|---|---|---|---|---|"]
     for stage in sorted({r["stage"] for r in results}):
@@ -236,9 +329,9 @@ def table(results) -> str:
 
 
 def tiers_for(tiers, ref, stage) -> list:
-    """Tiers called for a job: for intake with a reference tier, the reference
-    comes first (added when not already listed)."""
-    if stage != "intake" or not ref:
+    """Tiers called for a job: for intake/plan stages with a reference tier,
+    the reference comes first (added when not already listed)."""
+    if stage not in ("intake",) + PLAN_STAGES or not ref:
         return list(tiers)
     return [ref] + [t for t in tiers if t != ref]
 
@@ -258,14 +351,15 @@ def main(argv=None) -> int:
         print("refusing to benchmark with the mock LLM (PIPEZ_MOCK is set)", file=sys.stderr)
         return 2
     ref = args.reference_tier
-    unknown = [t for t in tiers + ([ref] if ref else []) if t not in config.MODEL_TIERS]
+    unknown = [t for t in tiers + ([ref] if ref else [])
+               if parse_tier(t)[0] not in config.MODEL_TIERS]
     if unknown:
         print("tiers not configured: %s (local needs PIPEZ_LOCAL_BASE_URL/MODEL)"
               % ", ".join(unknown), file=sys.stderr)
         return 2
     if not args.dry_run:
         need = []
-        used = tiers + ([ref] if ref else [])
+        used = [parse_tier(t)[0] for t in tiers + ([ref] if ref else [])]
         if any(config.MODEL_TIERS[t]["provider"] == "anthropic" for t in used) \
                 and not config.ANTHROPIC_API_KEY:
             need.append("ANTHROPIC_API_KEY")
@@ -311,14 +405,15 @@ def main(argv=None) -> int:
         llm = LLM()
         res = []
         for stage, run, system, prompt in jobs:
-            use_ref = ref if stage == "intake" else ""
+            use_ref = ref if stage in ("intake",) + PLAN_STAGES else ""
             reference_out = None
             for t in tiers_for(tiers, ref, stage):
                 cap = {}
                 is_ref = bool(use_ref) and t == use_ref
                 rec = await one_call(llm, stage, t, system, prompt, run,
                                      reference=reference_out, is_reference=is_ref,
-                                     reference_tier=use_ref or None, capture=cap)
+                                     reference_tier=use_ref or None, capture=cap,
+                                     save_output=args.save_outputs)
                 if is_ref:
                     reference_out = cap.get("out")
                 print("  %s %s %s ok=%s %.1fs" % (stage, run["id"], t, rec["ok"], rec["seconds"]))

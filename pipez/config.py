@@ -151,6 +151,9 @@ INTAKE_MAX_ROUNDS = int(os.environ.get("PIPEZ_INTAKE_MAX_ROUNDS", "2"))
 PLAN_MAX_TASKS = int(os.environ.get("PIPEZ_PLAN_MAX_TASKS", "12"))
 PLAN_MAX_MODULES = int(os.environ.get("PIPEZ_PLAN_MAX_MODULES", "8"))
 PLAN_EFFORT = os.environ.get("PIPEZ_PLAN_EFFORT", "high")
+# Revision rounds (previous plan + human note) may run on a cheaper setting.
+PLAN_REVISION_TIER = valid_tier(os.environ.get("PIPEZ_PLAN_REVISION_TIER", "deep"))
+PLAN_REVISION_EFFORT = os.environ.get("PIPEZ_PLAN_REVISION_EFFORT") or PLAN_EFFORT
 
 # Coding leaves (task 07c): one Agent SDK session per code task in the sandbox.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
