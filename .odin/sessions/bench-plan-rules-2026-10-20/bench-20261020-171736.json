@@ -1,0 +1,584 @@
+{
+  "db": "/tmp/claude-1000/-home-etl-projects-pipez/da67daff-717b-431c-aaf0-b7dcbbb0d8fb/scratchpad/bench/vm3.sqlite3",
+  "tiers": [
+    "deep@medium"
+  ],
+  "reference_tier": null,
+  "stages": [
+    "plan"
+  ],
+  "estimated_spend": 1.2939720000000001,
+  "results": [
+    {
+      "run_id": "aabf050e8aba",
+      "stage": "plan",
+      "tier": "deep@medium",
+      "model": "claude-opus-5-5",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 141.32,
+      "input_tokens": 23367,
+      "output_tokens": 11786,
+      "cost": 0.329188,
+      "tasks": 5,
+      "modules": 4,
+      "deploy_target": "vm",
+      "deploy_target_match": true,
+      "task_count_delta": 1,
+      "scaffold_forbidden": false,
+      "has_test_command": true,
+      "plan_chars": 22433,
+      "output": {
+        "architecture": "# pipez: hardening input validation (change on top of pipez/53e6dd6c7354)\n\n## Scope\nThis is a small change to an existing, working repo. Only three kinds of file change:\n- `src/app.js` (wiring)\n- a new pure helper `src/validate.js`\n- the existing test files `test/app.test.js` and `test/app-module.test.js`\n\nThe README API section is also updated. Nothing else in the repo is touched.\n\n## Components and data flow\n1. **Request path (unchanged order).** The request passes through the per-app express-rate-limit instance (60 req / 60 s / socket IP, 429 JSON with Retry-After), then `express.json({limit:'10kb'})`, then the routes. `x-powered-by` stays off.\n2. **`POST /shorten`** calls `validateUrl(req.body)` from `src/validate.js`. The checks run in this order:\n   - (a) The body must be a non-null, non-array object whose `url` is a non-empty string. Otherwise the result is `invalid_url`.\n   - (b) If `url.length > 2048` (JS UTF-16 length of the raw string), the result is `url_too_long`. This check runs before any parsing.\n   - (c) If the URL contains any ASCII control character, DEL, or any whitespace (`/[\\u0000-\\u001F\\u007F\\s]/`), the result is `invalid_url`.\n   - (d) The raw string must start with `http://` or `https://` (case-insensitive). This blocks `http:example.com`, which `new URL` would otherwise accept. It also blocks bare hosts, `//host`, `javascript:`, `data:`, `ftp:` and `file:`.\n   - (e) `new URL(url)` must not throw. `protocol` must be `http:` or `https:` and `hostname` must be non-empty. Otherwise the result is `invalid_url`.\n   - On success, the original string is stored as given. It is not trimmed or normalised.\n   - The insert, the 5-attempt collision retry, the 201 shape `{code, shortUrl, url}` and BASE_URL handling are all unchanged.\n3. **Malformed JSON.** A body-parser error of type `entity.parse.failed` returns 400 `{\"error\":\"invalid_url\"}`. `entity.too.large` still returns 413 exactly as before. Because 2048 < 10kb, 413 and url_too_long never conflict.\n4. **`GET /healthz`** stays registered before `GET /:code`. `healthz` is itself 7-character base62, so this order must be kept.\n5. **`GET /:code`** checks `isValidCode(req.params.code)` from `src/codes.js` (`/^[0-9A-Za-z]{7}$/`). If the check fails, or the code is not in the DB, the response is 404 `{\"error\":\"not_found\"}` with no Location header. A known code returns a 302.\n6. **Malformed percent-encoding.** Express 4 decodes route params with `decodeURIComponent`. On a bad sequence such as `/%E0%A4%A` it calls `next(err)` with a 400 URIError before the handler runs. The app's final error handler therefore maps the following to 404 `{\"error\":\"not_found\"}`:\n   - `err instanceof URIError`, or\n   - `err.status === 400` on a GET or HEAD whose `err.type` is not a body-parser type.\n\n   It never returns 500 and never redirects in this case. All other errors keep their existing behaviour.\n\n## Key decisions and how each is honoured\n- **deployment.vm_access = live-deploy.** After integration and green tests, pipez or the operator runs the unchanged `deploy/deploy.sh` with DEPLOY_HOST, DEPLOY_USER and DEPLOY_SSH_KEY. It replaces src/ on the VM, restarts the `pipez` unit and keeps `/var/lib/pipez`. Only the literal `DEPLOY OK: http://HOST:3000/healthz -> 200 {\"status\":\"ok\"}` line counts as VM verification. If a value is missing or the deploy fails, report NOT RUN or FAILED with the exit code. Never invent a host or credentials. Optional post-deploy smoke test: POST `javascript:alert(1)` returns 400 invalid_url, and GET `/abc` returns 404 not_found. These requests count against the deploying IP's rate limit. The build sandbox cannot reach the VM, so no task runs the deploy.\n- **hosting.target: same systemd setup and /healthz.** `deploy/pipez.service`, `provision.sh` and `deploy.sh` are not modified, and `/healthz` is unchanged.\n- **network.exposure = direct-port-3000.** No TLS and no proxy. TRUST_PROXY stays unset.\n- **legal.license = MIT.** LICENSE is untouched.\n- **repo.hosting_ci = none.** No CI files are added.\n- **No new dependencies.** Tests use node:test, node:assert/strict and global fetch, with an in-memory DB, in the existing files. No telemetry and no auth.\n- **Brief assumptions adopted.** Malformed JSON returns invalid_url. The length check runs before the scheme check. Length is the JS `.length` of the raw string.\n\n## The `deploy` block\nThe `deploy` field describes a foreground run of `node src/server.js` on a clean Ubuntu reviewer host at `/opt/pipez`. It is NOT the systemd VM. Never run it on the VM that hosts the `pipez` unit, because both bind port 3000.\n\n## Honest \"not verified\" items for the final report\nUnless they are actually run, report these as not verified:\n- Docker build and run\n- `shellcheck deploy/deploy.sh`\n- the privileged provisioning steps\n- the live VM line\n\n## OPTIONS (not built)\n- A per-route rate-limit exemption for /healthz.\n- A URL deny-list for private or loopback hosts (SSRF-style hardening). The brief only asks for scheme and format checks.",
+        "stack": [
+          "Node.js 22 LTS (engines >=20): unchanged",
+          "Express 4 (express@^4.21.2): unchanged",
+          "express-rate-limit@^7 with the in-memory store: unchanged",
+          "better-sqlite3@^11 (single SQLite file, WAL): unchanged",
+          "node:test + node:assert/strict + built-in fetch, no dev dependencies: unchanged",
+          "Docker (node:22-bookworm-slim) + docker compose: unchanged",
+          "systemd unit + bash provision.sh/deploy.sh (OpenSSH, curl): unchanged",
+          "MIT license"
+        ],
+        "repo_layout": "```\npipez/\n\u251c\u2500\u2500 package.json          # unchanged\n\u251c\u2500\u2500 package-lock.json     # unchanged\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 config.js         # unchanged\n\u2502   \u251c\u2500\u2500 codes.js          # unchanged (isValidCode reused)\n\u2502   \u251c\u2500\u2500 db.js             # unchanged\n\u2502   \u251c\u2500\u2500 validate.js       # NEW: pure validateUrl(body)\n\u2502   \u251c\u2500\u2500 app.js            # CHANGED: uses validateUrl, strict /:code, error mapping\n\u2502   \u2514\u2500\u2500 server.js         # unchanged\n\u251c\u2500\u2500 test/\n\u2502   \u251c\u2500\u2500 app-module.test.js  # CHANGED: old error-text assertions updated, validateUrl unit cases\n\u2502   \u2514\u2500\u2500 app.test.js         # CHANGED: HTTP cases for invalid_url / url_too_long / not_found\n\u251c\u2500\u2500 deploy/               # unchanged (pipez.service, provision.sh, deploy.sh)\n\u251c\u2500\u2500 Dockerfile            # unchanged\n\u251c\u2500\u2500 .dockerignore         # unchanged\n\u251c\u2500\u2500 docker-compose.yml    # unchanged\n\u251c\u2500\u2500 README.md             # CHANGED: API section only\n\u251c\u2500\u2500 LICENSE               # unchanged, MIT\n\u2514\u2500\u2500 .gitignore            # unchanged\n```",
+        "modules": [
+          {
+            "name": "validate",
+            "path": "src/validate.js",
+            "purpose": "A pure, dependency-free URL validator for POST /shorten bodies. It applies the brief's checks in order.",
+            "depends_on": [],
+            "contract": "CommonJS. Exports `{ validateUrl, MAX_URL_LENGTH }` with MAX_URL_LENGTH = 2048. `validateUrl(body)` returns `{ ok: true, url }` (url is the exact input string, unmodified) or `{ ok: false, error: 'invalid_url' | 'url_too_long' }`. It never throws.\n\nChecks, in order:\n(1) body is a non-null, non-array object and `typeof body.url === 'string'` and `body.url.length > 0`; otherwise invalid_url.\n(2) `url.length > 2048` gives url_too_long.\n(3) `/[\\u0000-\\u001F\\u007F\\s]/.test(url)` gives invalid_url.\n(4) `!/^https?:\\/\\//i.test(url)` gives invalid_url.\n(5) `new URL(url)` throws, or protocol is not in {'http:','https:'}, or hostname is '': invalid_url.\n\nOwns only src/validate.js. It is tested indirectly through HTTP tests in test/app.test.js, plus direct unit cases in test/app-module.test.js."
+          },
+          {
+            "name": "app",
+            "path": "src/app.js",
+            "purpose": "The Express app factory. It is changed to use validateUrl, enforce the strict GET /:code 404, map malformed JSON to invalid_url, and map param-decoding errors to 404.",
+            "depends_on": [
+              "validate"
+            ],
+            "contract": "`createApp(options)` keeps its existing signature, options and behaviour, and still never calls listen.\n\nChanges:\n- POST /shorten calls validateUrl(req.body). On failure it responds `res.status(400).json({error})`. On success the existing insert, retry, 201 and shortUrl logic is unchanged.\n- GET /:code: `!isValidCode(req.params.code)` or an unknown code gives 404 `{error:'not_found'}`. A known code gives a 302 to the stored URL.\n- GET /healthz stays registered before /:code.\n- Error handler:\n  - err.type === 'entity.parse.failed' gives 400 `{error:'invalid_url'}`.\n  - err.type === 'entity.too.large' gives 413, unchanged.\n  - `err instanceof URIError`, or (err.status === 400 && (req.method==='GET'||req.method==='HEAD') && !err.type), gives 404 `{error:'not_found'}`.\n  - Everything else is unchanged.\n- The rate limiter, json limit, x-powered-by and the JSON 404 fallback are unchanged.\n\nOwns only src/app.js. Tested by test/app.test.js and test/app-module.test.js through createApp with an in-memory DB."
+          },
+          {
+            "name": "tests",
+            "path": "test/",
+            "purpose": "The node:test suite covering every new validation case, plus all existing behaviour.",
+            "depends_on": [
+              "app",
+              "validate"
+            ],
+            "contract": "Files: test/app.test.js and test/app-module.test.js only. No new files and no dev dependencies. Uses node:test, node:assert/strict, global fetch with `redirect:'manual'`, and an ephemeral listen on port 0 with an in-memory DB (':memory:'), as the existing tests do. Create a fresh createApp per test, or keep each app under 60 requests, so the rate limiter never interferes.\n\nUpdate any existing assertion that expects the old 400 error text to the new codes. `npm test` (existing script) runs all files, and every test must pass. Every error-case test asserts the status, the exact JSON body, and that Content-Type matches /application\\/json/. Every GET 404 case also asserts that the Location header is null."
+          },
+          {
+            "name": "docs",
+            "path": "README.md",
+            "purpose": "User documentation. Only the API section changes.",
+            "depends_on": [],
+            "contract": "The API section documents:\n- POST /shorten returns 400 `{\"error\":\"invalid_url\"}` for a missing, empty or non-string url, malformed JSON, a non-http(s) scheme (javascript:, data:, ftp:, file:), a bare hostname, `//host`, `http://` with no host, or whitespace or control characters.\n- POST /shorten returns 400 `{\"error\":\"url_too_long\"}` for more than 2048 characters (checked first; exactly 2048 is allowed).\n- 413 is unchanged for bodies over 10kb.\n- GET /:code returns 404 `{\"error\":\"not_found\"}` for anything that is not exactly 7 base62 characters (including malformed percent-encoding) or an unknown code. It never redirects and never returns a 500.\n\nAll other sections are byte-for-byte unchanged. Verified by reading or grepping the file."
+          }
+        ],
+        "tasks": [
+          {
+            "id": "T1",
+            "title": "Add src/validate.js URL validator",
+            "module": "validate",
+            "prompt": "In the existing pipez repo (Node 22, CommonJS, no new dependencies), create src/validate.js. It exports `validateUrl(body)` and `MAX_URL_LENGTH = 2048`.\n\n`validateUrl` must never throw. It returns `{ok:true, url}`, where url is the exact input string with no trim and no normalisation, or `{ok:false, error}`.\n\nApply these checks strictly in order:\n1. body must be a non-null, non-array object with `typeof body.url === 'string'` and `body.url.length > 0`. Otherwise return error 'invalid_url'.\n2. If `url.length > 2048`, return 'url_too_long'. This runs before any other check, so a 3000-character `javascript:` URL gives url_too_long.\n3. If `/[\\u0000-\\u001F\\u007F\\s]/` matches, return 'invalid_url'. This covers leading or trailing spaces, tabs and newlines.\n4. If the raw string does not match `/^https?:\\/\\//i`, return 'invalid_url'. This rejects bare `example.com`, `localhost:3000`, `//example.com`, `http:example.com`, javascript:, data:, ftp: and file:.\n5. Wrap `new URL(url)` in try/catch. Return 'invalid_url' if it throws, if `u.protocol` is not 'http:' or 'https:', or if `u.hostname === ''` (this covers `http://` and `https://`).\n\nAdd a short JSDoc comment. Do not edit any other file.",
+            "tier": "standard",
+            "depends_on": [],
+            "acceptance": [
+              "src/validate.js exists and `node -e \"const v=require('./src/validate');console.log(JSON.stringify(v.validateUrl({url:'javascript:alert(1)'})))\"` prints {\"ok\":false,\"error\":\"invalid_url\"}",
+              "validateUrl({url:'https://example.com/a'}) returns {ok:true,url:'https://example.com/a'}",
+              "validateUrl({url:'javascript:'+'a'.repeat(3000)}) returns error 'url_too_long'",
+              "validateUrl returns 'invalid_url' for 'example.com', '//example.com', 'http://', '', ' https://example.com', 'ftp://example.com/f', 'file:///etc/passwd', 'data:text/html,x', and for a body of null, [] or {url:5}",
+              "For a string of exactly 2048 characters starting with 'https://example.com/', validateUrl returns ok:true; for 2049 characters it returns 'url_too_long'",
+              "MAX_URL_LENGTH === 2048 is exported, and package.json dependencies are unchanged"
+            ]
+          },
+          {
+            "id": "T2",
+            "title": "Wire strict validation and 404 handling into src/app.js",
+            "module": "app",
+            "prompt": "Edit only src/app.js in the pipez repo (Express 4). Keep everything else exactly as it is:\n- the per-app express-rate-limit (60 per 60 s, draft-7 headers, JSON 429 with Retry-After)\n- express.json 10kb with 413\n- x-powered-by disabled\n- the 201 `{code, shortUrl, url}` shape and BASE_URL logic\n- the 5-attempt collision retry ending in 500, with reserved codes counting as attempts\n- GET /healthz registered BEFORE GET /:code (note that 'healthz' is itself valid 7-character base62)\n\nChanges:\n(1) POST /shorten: call `validateUrl(req.body)` from `./validate` (contract: it returns `{ok:true,url}` or `{ok:false,error:'invalid_url'|'url_too_long'}`; another engineer is writing it in parallel). On failure respond `res.status(400).json({error: r.error})`. On success store `r.url`, the raw string. Remove the old inline URL checks.\n(2) GET /:code: if `!isValidCode(req.params.code)` (from ./codes), or the DB lookup misses, respond 404 `{error:'not_found'}` with no Location header. Otherwise keep the 302.\n(3) Final error handler:\n   - `err.type === 'entity.parse.failed'` gives 400 `{error:'invalid_url'}`.\n   - `entity.too.large` keeps its existing 413 response.\n   - `err instanceof URIError`, or `(err.status === 400 && !err.type && (req.method === 'GET' || req.method === 'HEAD'))`, gives 404 `{error:'not_found'}`. Express's param decoding of malformed percent-encoding such as `/%E0%A4%A` calls next(err) with a 400 decode error before the handler runs; this must become 404, never 400, 500 or a redirect.\n   - All other errors keep their current handling.\n\nCheck by hand with a throwaway script: createApp on an in-memory DB, listen on port 0, and fetch the cases. Do not add files other than throwaway scripts outside the repo.",
+            "tier": "deep",
+            "depends_on": [],
+            "acceptance": [
+              "POST /shorten with body {\"url\":\"javascript:alert(1)\"} returns 400 with JSON body {\"error\":\"invalid_url\"}",
+              "POST /shorten with a malformed JSON body ('{bad') and content-type application/json returns 400 {\"error\":\"invalid_url\"}",
+              "POST /shorten with a 2049-character https URL returns 400 {\"error\":\"url_too_long\"}; with exactly 2048 characters it returns 201 {code, shortUrl, url}, and url equals the input",
+              "POST /shorten with a body over 10kb still returns 413",
+              "GET /%E0%A4%A, GET /abc-def, GET /abc123 and GET /abcd1234 each return 404 {\"error\":\"not_found\"} with no Location header",
+              "GET /healthz returns 200 {\"status\":\"ok\"}, and GET /<known code> returns 302 to the stored URL",
+              "The 61st request from one IP within 60 s still returns 429 with Retry-After"
+            ]
+          },
+          {
+            "id": "T3",
+            "title": "Add validation and strict-code tests; update old assertions",
+            "module": "tests",
+            "prompt": "Edit only test/app.test.js and/or test/app-module.test.js in the pipez repo. Use node:test, node:assert/strict and global fetch, with no new dependencies, following the existing style: createApp with an in-memory DB (':memory:'), listen on port 0, close after. Use a fresh app per test, or fewer than 60 requests per app, so the rate limiter does not interfere. Use `redirect:'manual'` for GETs.\n\nFirst, update any existing assertion that expects the old 400 error text to the new codes.\n\nThen add one test per case. Each error test asserts the status, deepEqual of the JSON body, and that Content-Type matches /application\\/json/.\n- POST /shorten returns 400 {error:'invalid_url'} for each of: 'javascript:alert(1)', 'data:text/html,x', 'ftp://example.com/f', 'file:///etc/passwd', 'example.com', '//example.com', 'http://', ''.\n- POST /shorten returns 400 invalid_url for: a missing url ({}), a non-string url ({url:123}), and a malformed JSON body sent raw as '{bad' with content-type application/json.\n- 'http://example.com/x' and 'https://example.com/y' each return 201, with body.url equal to the input and body.code matching /^[0-9A-Za-z]{7}$/.\n- A URL of exactly 2048 characters ('https://example.com/' padded with 'a') returns 201. The same with 2049 characters returns 400 {error:'url_too_long'}.\n- 'javascript:' + 'a'.repeat(3000) returns 400 url_too_long.\n- GET /abc123 (6 chars), /abcd1234 (8), /abc-def, /%E0%A4%A (malformed percent-encoding) and /_______ (7 underscores) each return 404 {error:'not_found'}, JSON content type, and `res.headers.get('location') === null`.\n- GET /Zz9Zz9Z (valid format, unknown) returns 404 not_found. A code created via POST returns 302 with Location equal to the original URL.\n\nIn test/app-module.test.js, also add direct unit cases for `require('../src/validate').validateUrl` covering the order rule: an over-long javascript URL gives url_too_long, and ' https://example.com' (leading space) gives invalid_url.\n\nRun `npm test`. Every test must pass, including the existing ones for 429, 413, healthz and collisions.",
+            "tier": "standard",
+            "depends_on": [
+              "T1",
+              "T2"
+            ],
+            "acceptance": [
+              "`npm test` exits 0 with 0 failures",
+              "test/app.test.js contains tests that POST javascript:alert(1), data:text/html,x, ftp://example.com/f, file:///etc/passwd, example.com, //example.com, http:// and an empty string, each asserting 400 {\"error\":\"invalid_url\"}",
+              "The test files contain tests for a missing url, a non-string url and malformed JSON asserting 400 invalid_url, and tests for 2048 characters giving 201, 2049 giving url_too_long, and an over-long javascript: URL giving url_too_long",
+              "The test files contain GET tests for a 6-character code, an 8-character code, a code containing '-', /%E0%A4%A, and 7 non-base62 characters, each asserting 404 {\"error\":\"not_found\"} and a null Location header",
+              "The test files contain a test for a valid-format unknown code giving 404, and a known code giving 302",
+              "No test file still asserts the old 400 error text, and package.json devDependencies are absent or empty"
+            ]
+          },
+          {
+            "id": "T4",
+            "title": "Update README API section",
+            "module": "docs",
+            "prompt": "Edit only the API section of README.md in the pipez repo. Change no other section.\n\nDocument the following:\n- POST /shorten returns 400 {\"error\":\"invalid_url\"} when url is missing, empty or not a string, when the JSON is malformed, when the URL is not an absolute http:// or https:// URL (for example javascript:, data:, ftp:, file:, bare hostnames like example.com or localhost:3000, scheme-relative //example.com, or http:// with no host), or when it contains whitespace or control characters. URLs are stored exactly as given.\n- POST /shorten returns 400 {\"error\":\"url_too_long\"} when the URL is longer than 2048 characters. This is checked first; exactly 2048 is allowed.\n- 413 is unchanged for bodies over 10kb.\n- GET /:code returns 404 {\"error\":\"not_found\"} for any code that is not exactly 7 base62 characters ([0-9A-Za-z]), including malformed percent-encoding, and for unknown codes. It never redirects and never returns a 500.\n\nAdd one curl example showing the invalid_url response.",
+            "tier": "light",
+            "depends_on": [],
+            "acceptance": [
+              "README.md contains the strings 'invalid_url', 'url_too_long' and 'not_found' in its API section",
+              "README.md states the 2048-character limit and that only absolute http:// or https:// URLs are accepted",
+              "README.md still contains the existing TRUST_PROXY warning, the VM (systemd) deployment section and the Docker one-liner, unchanged"
+            ]
+          },
+          {
+            "id": "T5",
+            "title": "Local verification gate",
+            "module": "tests",
+            "prompt": "From the repo root on the integrated branch, run `npm ci --no-audit --no-fund && npm test` and require rc=0. Fix only genuine defects, and only in src/app.js, src/validate.js or the test files.\n\nAlso confirm that these are byte-identical to tag pipez/53e6dd6c7354: package.json, package-lock.json, LICENSE, Dockerfile, .dockerignore, docker-compose.yml, deploy/ and .gitignore (for example `git diff --stat pipez/53e6dd6c7354 -- <paths>` is empty). Confirm that no CI directory exists.\n\nDo not deploy, ssh, or contact any host. The live redeploy via deploy/deploy.sh is performed by pipez after integration.",
+            "tier": "standard",
+            "depends_on": [
+              "T3",
+              "T4"
+            ],
+            "acceptance": [
+              "`npm ci --no-audit --no-fund && npm test` exits 0 with 0 failed tests from the repo root",
+              "`git diff --stat pipez/53e6dd6c7354 -- package.json package-lock.json LICENSE Dockerfile .dockerignore docker-compose.yml deploy .gitignore` prints nothing",
+              "No .github/, .gitlab-ci.yml or other CI configuration exists in the repository"
+            ]
+          }
+        ],
+        "scaffold_commands": [
+          "npm ci --no-audit --no-fund"
+        ],
+        "build_command": "npm ci --no-audit --no-fund",
+        "test_command": "npm test",
+        "deploy": {
+          "target": "vm",
+          "install_commands": [
+            "sudo apt-get update",
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg build-essential python3",
+            "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -",
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs",
+            "sudo chown -R etl:etl /opt/pipez",
+            "NPM_CONFIG_UPDATE_NOTIFIER=false npm ci --omit=dev --no-audit --no-fund",
+            "mkdir -p /opt/pipez/data"
+          ],
+          "start_command": "node src/server.js",
+          "port": 3000,
+          "health_path": "/healthz",
+          "env": [
+            {
+              "name": "PORT",
+              "value": "3000"
+            },
+            {
+              "name": "DB_PATH",
+              "value": "/opt/pipez/data/shortener.db"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "run_id": "53e6dd6c7354",
+      "stage": "plan",
+      "tier": "deep@medium",
+      "model": "claude-opus-5-5",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 166.09,
+      "input_tokens": 16601,
+      "output_tokens": 20422,
+      "cost": 0.474844,
+      "tasks": 6,
+      "modules": 6,
+      "deploy_target": "vm",
+      "deploy_target_match": true,
+      "task_count_delta": 1,
+      "scaffold_forbidden": false,
+      "has_test_command": true,
+      "plan_chars": 36323,
+      "output": {
+        "architecture": "# pipez: increment for systemd deployment on an Ubuntu VM\n\nThis change builds on tag `pipez/c7213225e46a`. The API code under `src/`, the Dockerfile, `.dockerignore`, `docker-compose.yml`, `LICENSE`, `.gitignore`, `package.json`/`package-lock.json` and the 15 existing tests stay **as they are**. A file there is touched only if the verification gate finds a real defect. The new work is a `deploy/` directory with three files, one static test file, and README updates.\n\n## Components\n1. **App (frozen)**: `src/*.js` is the Express API. It has POST /shorten, GET /:code (302), GET /healthz (200 `{\"status\":\"ok\"}`), express-rate-limit at 60 requests per 60 s per IP held in memory, and better-sqlite3 storage in WAL mode. Config comes from env vars: PORT, DB_PATH, TRUST_PROXY and BASE_URL.\n2. **systemd unit** `deploy/pipez.service`:\n   - Runs `/usr/bin/node /opt/pipez/src/server.js` with `WorkingDirectory=/opt/pipez`, as user and group `pipez`.\n   - Sets `Environment=PORT=3000` and `Environment=DB_PATH=/var/lib/pipez/shortener.db`. TRUST_PROXY is not set, so it defaults to false.\n   - Uses `StateDirectory=pipez`, `Restart=on-failure`, and hardening: NoNewPrivileges, ProtectSystem=strict, ProtectHome, PrivateTmp, ReadWritePaths=/var/lib/pipez.\n   - Logs go to journald through stdout and stderr.\n3. **Provisioner** `deploy/provision.sh`: an idempotent bash script, run as root on the VM. It works through these steps in order: OS check (Ubuntu 22.04 or 24.04) \u2192 NodeSource node_22.x apt repo, skipped if Node 22 is already installed \u2192 build-essential and python3 \u2192 `pipez` system user \u2192 /opt/pipez and /var/lib/pipez \u2192 copy the app and run `npm ci --omit=dev` \u2192 install the unit, daemon-reload, enable and restart \u2192 poll /healthz for about 30 s \u2192 print a firewall hint.\n4. **Deploy wrapper** `deploy/deploy.sh`: runs locally. It takes the host, user and key from arguments or from `DEPLOY_HOST`/`DEPLOY_USER`/`DEPLOY_SSH_KEY`. It copies the app and `deploy/` to a staging directory on the VM (rsync, or scp if rsync is missing), runs `sudo bash <staging>/deploy/provision.sh` over SSH, then requires `curl http://HOST:3000/healthz` to return 200 with a JSON content type.\n5. **Tests**: the 15 existing node:test tests, plus a new `test/deploy.test.js` that checks the required unit directives and script properties. It is pure Node, with no tools and no dev dependencies.\n6. **Docs**: README.md keeps its existing sections and gains a VM deployment section and warnings.\n\n## Data flow (VM)\nClient \u2192 TCP 0.0.0.0:3000 over plain HTTP (no proxy, no TLS) \u2192 Express app. The rate limiter uses the socket IP because TRUST_PROXY is false. Links are stored in the SQLite file `/var/lib/pipez/shortener.db`, in a directory created and owned through StateDirectory. Logs go to journald.\n\n## Deployment flow\n- **Operator path:** run `deploy/deploy.sh HOST USER KEY` on a workstation. It copies files over SSH, runs `sudo provision.sh` on the VM, then checks `curl http://HOST:3000/healthz`.\n- **pipez path:** the release tarball is extracted to `/opt/pipez/`. The `deploy` block runs `sudo bash deploy/provision.sh` from that directory. provision.sh notices that its source directory already is /opt/pipez and skips the copy. The start command then starts the systemd service and stays in the foreground following its journal.\n\n## How each brief decision is honoured\n- **runtime.language (Node/Express):** the code is unchanged. Node 22 is installed on the VM.\n- **storage.database (single SQLite file):** `DB_PATH=/var/lib/pipez/shortener.db`. StateDirectory makes the directory owned by `pipez`. The README states that only one instance may run.\n- **security.rate_limit:** unchanged. The README notes that the in-memory counters reset on restart.\n- **deployment.packaging:** the Docker files are left untouched, and a separate systemd unit runs Node directly.\n- **hosting.target (Ubuntu VM with systemd):** covered by `deploy/pipez.service` and `deploy/provision.sh`.\n- **deployment.vm_access (live-deploy):** build tasks run in an isolated sandbox with no network access to the VM, so **no task deploys, uses SSH or checks a live host**. The live deploy and the /healthz check on the VM are done by pipez after integration, using the `deploy` block. The operator can also run `deploy/deploy.sh` with the real host, user and key, which come only from arguments or env vars and are never committed. If no credentials are supplied, the live deploy is reported as NOT RUN, along with what is needed: host, user with passwordless sudo, SSH key path, and port 3000 reachable.\n- **deployment.os_version (22.04 and 24.04):** provision.sh reads /etc/os-release and exits with a clear message on any other OS.\n- **deployment.node_install (NodeSource apt):** signing key at `/etc/apt/keyrings/nodesource.gpg`, repo `https://deb.nodesource.com/node_22.x nodistro main`. The install is skipped if `node` major version 22 is already present.\n- **deployment.provisioning (bash script):** plain bash with `set -euo pipefail`. No Ansible or other tools.\n- **network.exposure (direct port 3000):** no proxy or TLS. provision.sh prints `ufw allow 3000/tcp` but never changes the firewall. The README explains that the socket IP is used and that TRUST_PROXY must be set if a proxy is added later.\n- **storage.backup (none) and data.retention (forever):** the README warns that the DB is not backed up, can be lost permanently, and grows without limit.\n- **repo.hosting_ci (none):** no CI files are added.\n- **testing.level (basic):** `npm test` (existing tests plus static deploy checks), `systemd-analyze verify deploy/pipez.service`, and `shellcheck deploy/*.sh` are run in the final gate task. Any tool that is unavailable is reported as such.\n- **auth.method (none), legal.license (MIT):** unchanged.\n- **observability.telemetry (none):** the scripts contact only deb.nodesource.com, Ubuntu apt mirrors, the npm registry, and the target VM (deploy.sh). npm runs with `--no-audit --no-fund` and `NO_UPDATE_NOTIFIER=1`.\n\n## Assumptions (taken from the brief)\n- The app lives in /opt/pipez and the service user is `pipez`.\n- The service listens on 0.0.0.0:3000.\n- The VM user has passwordless sudo.\n- The VM has outbound internet access for apt and npm.\n- The firewall is left to the operator.\n\n## OPTIONS (not built)\n- A reverse proxy with TLS (would also need TRUST_PROXY to be set).\n- A periodic `sqlite3 .backup` timer for the DB file.\n- A shared rate-limit store, so several instances could run.\n- CI to run npm test, shellcheck and systemd-analyze automatically.",
+        "stack": [
+          "Node.js 22 LTS (NodeSource apt on the VM; engines >=20)",
+          "Express 4 (express@^4.21.2)",
+          "express-rate-limit@^7 (in-memory store)",
+          "better-sqlite3@^11 (SQLite, WAL)",
+          "node:test + built-in fetch (no dev dependencies)",
+          "Docker (node:22-bookworm-slim) + docker compose (unchanged)",
+          "systemd unit (journald logging)",
+          "bash provisioning scripts (set -euo pipefail), rsync/scp + ssh + curl for the local wrapper",
+          "shellcheck and systemd-analyze for verification (used if available)",
+          "MIT license"
+        ],
+        "repo_layout": "```\npipez/\n\u251c\u2500\u2500 package.json              # unchanged (scripts start/test)\n\u251c\u2500\u2500 package-lock.json         # unchanged\n\u251c\u2500\u2500 src/                      # unchanged API (config, codes, db, app, server)\n\u2502   \u251c\u2500\u2500 config.js\n\u2502   \u251c\u2500\u2500 codes.js\n\u2502   \u251c\u2500\u2500 db.js\n\u2502   \u251c\u2500\u2500 app.js\n\u2502   \u2514\u2500\u2500 server.js\n\u251c\u2500\u2500 test/\n\u2502   \u251c\u2500\u2500 app.test.js           # existing\n\u2502   \u251c\u2500\u2500 app-module.test.js    # existing\n\u2502   \u2514\u2500\u2500 deploy.test.js        # NEW: static checks of deploy/ files\n\u251c\u2500\u2500 deploy/                   # NEW\n\u2502   \u251c\u2500\u2500 pipez.service         # systemd unit\n\u2502   \u251c\u2500\u2500 provision.sh          # runs on the VM as root, idempotent\n\u2502   \u2514\u2500\u2500 deploy.sh             # local wrapper: copy + ssh sudo provision + curl /healthz\n\u251c\u2500\u2500 Dockerfile                # unchanged\n\u251c\u2500\u2500 .dockerignore             # unchanged\n\u251c\u2500\u2500 docker-compose.yml        # unchanged\n\u251c\u2500\u2500 README.md                 # UPDATED: VM deployment section and warnings\n\u251c\u2500\u2500 LICENSE                   # unchanged (MIT)\n\u2514\u2500\u2500 .gitignore                # unchanged\n```",
+        "modules": [
+          {
+            "name": "app",
+            "path": "src/",
+            "purpose": "The existing Express URL shortener API. It is frozen for this increment.",
+            "depends_on": [],
+            "contract": "Owns src/config.js, src/codes.js, src/db.js, src/app.js and src/server.js, unchanged from tag pipez/c7213225e46a.\n\nPublic interface:\n- `node src/server.js` listens on 0.0.0.0:$PORT (default 3000).\n- Env vars: PORT, DB_PATH (default /data/shortener.db; the parent directory is created automatically), TRUST_PROXY (unset means false), BASE_URL.\n- Endpoints: GET /healthz returns 200 `{\"status\":\"ok\"}`; POST /shorten returns 201 `{code,shortUrl,url}` or 400/413/500; GET /:code returns 302 or 404 JSON.\n- Rate limit: 60 requests per 60 s per IP, with a JSON 429 and Retry-After on the 61st.\n- Exits cleanly on SIGTERM.\n\nChanges are allowed only to fix a defect found by the verification gate.\n\nTested by test/app.test.js and test/app-module.test.js (15 tests) through `npm test`."
+          },
+          {
+            "name": "systemd-unit",
+            "path": "deploy/pipez.service",
+            "purpose": "systemd unit that runs the app directly with Node on the VM, with hardening.",
+            "depends_on": [
+              "app"
+            ],
+            "contract": "Owns deploy/pipez.service.\n\nIt must contain these lines exactly, one per line:\n- [Unit]: `Description=pipez URL shortener`, `After=network-online.target`, `Wants=network-online.target`.\n- [Service]: `Type=simple`, `User=pipez`, `Group=pipez`, `WorkingDirectory=/opt/pipez`, `ExecStart=/usr/bin/node /opt/pipez/src/server.js`, `Environment=PORT=3000`, `Environment=DB_PATH=/var/lib/pipez/shortener.db`, `Environment=NODE_ENV=production`, `Restart=on-failure`, `RestartSec=2`, `StateDirectory=pipez`, `StateDirectoryMode=0750`, `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, `ReadWritePaths=/var/lib/pipez`, `StandardOutput=journal`, `StandardError=journal`.\n- [Install]: `WantedBy=multi-user.target`.\n\nThe file must not contain the string TRUST_PROXY.\n\nTested by test/deploy.test.js (static line checks) and by `systemd-analyze verify deploy/pipez.service` in the gate task."
+          },
+          {
+            "name": "provisioner",
+            "path": "deploy/provision.sh",
+            "purpose": "Idempotent root script that prepares an Ubuntu 22.04 or 24.04 VM and installs, starts and health-checks the pipez service.",
+            "depends_on": [
+              "systemd-unit",
+              "app"
+            ],
+            "contract": "Owns deploy/provision.sh. It is executable, starts with `#!/usr/bin/env bash` and has `set -euo pipefail`.\n\nUsage: `sudo bash deploy/provision.sh`. Env `PIPEZ_SRC` overrides the source dir, which defaults to the repo root (the parent of the script's directory).\n\nBehaviour, in order:\n- (0) Not root: print `provision.sh must be run as root (use sudo)` and exit 1.\n- (a) Read /etc/os-release. If ID is not ubuntu or VERSION_ID is not 22.04 or 24.04, print `Unsupported OS: <PRETTY_NAME>. Supported: Ubuntu 22.04, 24.04` and exit 1.\n- (b) With DEBIAN_FRONTEND=noninteractive, apt-get install ca-certificates curl gnupg. If `node -p 'process.versions.node.split(\".\")[0]'` prints 22, skip the Node install. Otherwise:\n  - write the key to /etc/apt/keyrings/nodesource.gpg (curl https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor --yes -o ...);\n  - write /etc/apt/sources.list.d/nodesource.list containing `deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main`;\n  - run apt-get update and apt-get install -y nodejs.\n- (c) apt-get install -y build-essential python3.\n- (d) If `id -u pipez` fails, run `useradd --system --user-group --no-create-home --home-dir /var/lib/pipez --shell /usr/sbin/nologin pipez`. Create /opt/pipez (root, 0755) and /var/lib/pipez (pipez:pipez, 0750) with install -d.\n- (e) If realpath(PIPEZ_SRC) differs from /opt/pipez, copy package.json and package-lock.json and replace /opt/pipez/src with a fresh copy. Otherwise skip the copy. Then in /opt/pipez run `NO_UPDATE_NOTIFIER=1 npm ci --omit=dev --no-audit --no-fund`. Afterwards chown -R root:root /opt/pipez/src /opt/pipez/node_modules /opt/pipez/package*.json and chmod -R a+rX on them.\n- (f) Run `install -m 0644 <src>/deploy/pipez.service /etc/systemd/system/pipez.service`, `systemctl daemon-reload`, `systemctl enable pipez`, `systemctl restart pipez`.\n- (g) Poll `curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/healthz` once per second, at most 30 times.\n  - On 200: print `pipez is healthy on port 3000`.\n  - Otherwise: print `journalctl -u pipez -n 50 --no-pager` and exit 1.\n- (h) Print a hint to open the firewall, e.g. `sudo ufw allow 3000/tcp`. Never run ufw or iptables.\n\nThe only outbound hosts are deb.nodesource.com, Ubuntu apt mirrors and the npm registry. Re-running the script is safe.\n\nTested by test/deploy.test.js (static checks) and by `shellcheck deploy/provision.sh` in the gate task."
+          },
+          {
+            "name": "deploy-wrapper",
+            "path": "deploy/deploy.sh",
+            "purpose": "Local wrapper that pushes the app to a VM over SSH, runs the provisioner with sudo, and checks /healthz remotely.",
+            "depends_on": [
+              "provisioner"
+            ],
+            "contract": "Owns deploy/deploy.sh. It is executable, starts with `#!/usr/bin/env bash` and has `set -euo pipefail`.\n\nUsage: `deploy/deploy.sh [HOST] [USER] [SSH_KEY]`. Each argument falls back to DEPLOY_HOST, DEPLOY_USER and DEPLOY_SSH_KEY.\n- If any value is missing, print a usage message naming all three env vars and exit 2.\n- If the key file does not exist, exit 2.\n- `-h` or `--help` prints usage and exits 0.\n\nBehaviour:\n- SSH options: `-i KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new`.\n- Copy package.json, package-lock.json, src/ and deploy/ from the repo root to the remote staging dir `/tmp/pipez-deploy`. Use rsync -az --delete if rsync is present locally, otherwise run `ssh mkdir -p` and then `scp -r`.\n- Run `ssh ... 'sudo bash /tmp/pipez-deploy/deploy/provision.sh'`. A non-zero exit from it makes deploy.sh exit non-zero.\n- Run `curl -sS -o <tmpfile> -w '%{http_code} %{content_type}' http://HOST:3000/healthz`. Require code 200 and a content type containing application/json. Print the body and `healthz OK` on success. Otherwise print the details and exit 1.\n\nThe script contains no hard-coded hosts, users, keys or IPs.\n\nTested by test/deploy.test.js (static checks, and that running it with no args and no env exits 2) and by `shellcheck deploy/deploy.sh` in the gate task."
+          },
+          {
+            "name": "tests",
+            "path": "test/",
+            "purpose": "The existing API tests plus new static checks of the deploy artifacts, all run by npm test.",
+            "depends_on": [
+              "app",
+              "systemd-unit",
+              "provisioner",
+              "deploy-wrapper"
+            ],
+            "contract": "Owns test/deploy.test.js (new). Existing files test/app.test.js and test/app-module.test.js stay unchanged.\n\ndeploy.test.js uses only node:test, node:assert/strict, node:fs, node:path and node:child_process. It never makes network calls and never needs shellcheck or systemd-analyze.\n\nIt asserts:\n- every directive line from the systemd-unit contract is present in deploy/pipez.service, and TRUST_PROXY is absent;\n- both scripts begin with `#!/usr/bin/env bash`, contain `set -euo pipefail`, and have the executable bit set;\n- provision.sh contains `22.04`, `24.04`, `/etc/apt/keyrings`, `node_22.x`, `npm ci --omit=dev`, `build-essential`, `python3`, `useradd`, `/usr/sbin/nologin`, `systemctl daemon-reload`, `systemctl enable`, `systemctl restart`, `http://127.0.0.1:3000/healthz` and `ufw allow 3000/tcp`, and has no line that starts with `ufw` or `sudo ufw` as a command (only inside echo/printf);\n- deploy.sh references DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY and `/healthz`, and when run via `bash deploy/deploy.sh` with those env vars removed it exits with status 2.\n\n`npm test` must run all three test files."
+          },
+          {
+            "name": "docs",
+            "path": "README.md",
+            "purpose": "User documentation: existing sections plus VM deployment, warnings, and the corrected OPTIONS list.",
+            "depends_on": [
+              "systemd-unit",
+              "provisioner",
+              "deploy-wrapper"
+            ],
+            "contract": "Owns README.md.\n\nKeep every existing section, and make sure it still contains:\n- the one-command Docker run `docker build -t pipez . && docker run -p 3000:3000 -v pipez-data:/data pipez`;\n- an env-var table with PORT, DB_PATH, TRUST_PROXY and BASE_URL;\n- curl examples for POST /shorten, GET /<code> and GET /healthz;\n- a TRUST_PROXY reverse-proxy warning;\n- a note that the database grows without limit.\n\nAdd a section headed `## Deploying to an Ubuntu VM (systemd)` covering:\n- prerequisites: Ubuntu 22.04/24.04, an SSH user with passwordless sudo, outbound internet for apt/npm, rsync or scp, ssh and curl locally;\n- the deploy command, both forms: `deploy/deploy.sh HOST USER KEY` and `DEPLOY_HOST=... DEPLOY_USER=... DEPLOY_SSH_KEY=... deploy/deploy.sh`;\n- the service env vars (PORT=3000, DB_PATH=/var/lib/pipez/shortener.db, TRUST_PROXY unset);\n- `systemctl status pipez` and `journalctl -u pipez`;\n- opening the firewall with `sudo ufw allow 3000/tcp` (the operator's job);\n- the update procedure (re-run deploy/deploy.sh);\n- uninstall steps: `sudo systemctl disable --now pipez`, removing /etc/systemd/system/pipez.service, daemon-reload, `sudo userdel pipez`, `sudo rm -rf /opt/pipez`, optionally `sudo rm -rf /var/lib/pipez` (deletes all links), and optionally removing /etc/apt/sources.list.d/nodesource.list and /etc/apt/keyrings/nodesource.gpg.\n\nWarnings to include:\n- The service is exposed directly over plain HTTP with no TLS. Rate limiting uses the socket IP, and TRUST_PROXY must be set if a proxy is added later.\n- /var/lib/pipez/shortener.db is not backed up, can be lost permanently, and grows without limit.\n- Only one instance may run, because the DB is a single file and the rate-limit counters are in memory and reset on restart.\n\nThe OPTIONS list must no longer contain `A systemd unit for VM deployments`.\n\nTested by manual review and grep."
+          }
+        ],
+        "tasks": [
+          {
+            "id": "T1",
+            "title": "Write the systemd unit deploy/pipez.service",
+            "module": "systemd-unit",
+            "prompt": "The pipez repo is a Node 22/Express URL shortener at tag pipez/c7213225e46a. Do not modify src/, the Dockerfile, the compose file, the tests or package*.json.\n\nCreate deploy/pipez.service: a systemd unit that runs the app directly with Node (not Docker) on an Ubuntu VM. Include exactly these directives, one per line:\n- [Unit]: Description=pipez URL shortener, After=network-online.target, Wants=network-online.target.\n- [Service]: Type=simple, User=pipez, Group=pipez, WorkingDirectory=/opt/pipez, ExecStart=/usr/bin/node /opt/pipez/src/server.js, Environment=PORT=3000, Environment=DB_PATH=/var/lib/pipez/shortener.db, Environment=NODE_ENV=production, Restart=on-failure, RestartSec=2, StateDirectory=pipez, StateDirectoryMode=0750, NoNewPrivileges=true, ProtectSystem=strict, ProtectHome=true, PrivateTmp=true, ReadWritePaths=/var/lib/pipez, StandardOutput=journal, StandardError=journal.\n- [Install]: WantedBy=multi-user.target.\n\nDo NOT set TRUST_PROXY anywhere in the file; leaving it unset means false. A short comment at the top may explain that TRUST_PROXY is deliberately unset because the service is exposed directly on port 3000.\n\nIf systemd-analyze is available locally, run `systemd-analyze verify deploy/pipez.service` and fix real syntax findings. Warnings caused only by the sandbox (no /usr/bin/node, no pipez user) are acceptable.",
+            "tier": "light",
+            "depends_on": [],
+            "acceptance": [
+              "deploy/pipez.service exists and contains the line `ExecStart=/usr/bin/node /opt/pipez/src/server.js`",
+              "deploy/pipez.service contains `User=pipez`, `Group=pipez`, `WorkingDirectory=/opt/pipez`, `StateDirectory=pipez` and `Restart=on-failure`",
+              "deploy/pipez.service contains `Environment=PORT=3000` and `Environment=DB_PATH=/var/lib/pipez/shortener.db`, and does not contain the string TRUST_PROXY",
+              "deploy/pipez.service contains `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true` and `ReadWritePaths=/var/lib/pipez`",
+              "deploy/pipez.service contains `WantedBy=multi-user.target`"
+            ]
+          },
+          {
+            "id": "T2",
+            "title": "Write the idempotent VM provisioner deploy/provision.sh",
+            "module": "provisioner",
+            "prompt": "The pipez repo is a Node 22/Express URL shortener. Do not modify src/ or other existing files.\n\nCreate deploy/provision.sh (chmod +x). It starts with `#!/usr/bin/env bash` and `set -euo pipefail`, runs as root on an Ubuntu VM, and must be idempotent (safe to re-run). Determine SCRIPT_DIR from BASH_SOURCE, and set SRC=${PIPEZ_SRC:-$(cd \"$SCRIPT_DIR/..\" && pwd)}.\n\nSteps:\n0. If EUID is not 0, print `provision.sh must be run as root (use sudo)` to stderr and exit 1.\n(a) Source /etc/os-release. Unless ID=ubuntu and VERSION_ID is 22.04 or 24.04, print `Unsupported OS: $PRETTY_NAME. Supported: Ubuntu 22.04, 24.04` and exit 1.\n(b) Export DEBIAN_FRONTEND=noninteractive. Run apt-get update, then apt-get install -y ca-certificates curl gnupg. If `command -v node` succeeds and `node -p 'process.versions.node.split(\".\")[0]'` prints 22, print that Node 22 is present and skip. Otherwise:\n  - mkdir -p /etc/apt/keyrings (mode 0755);\n  - curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg;\n  - write /etc/apt/sources.list.d/nodesource.list with `deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main`;\n  - apt-get update; apt-get install -y nodejs.\n(c) apt-get install -y build-essential python3, so better-sqlite3 can compile if there is no prebuilt binary.\n(d) If `id -u pipez` fails, run `useradd --system --user-group --no-create-home --home-dir /var/lib/pipez --shell /usr/sbin/nologin pipez`. Then run `install -d -o root -g root -m 0755 /opt/pipez` and `install -d -o pipez -g pipez -m 0750 /var/lib/pipez`.\n(e) If `realpath \"$SRC\"` differs from /opt/pipez, copy package.json and package-lock.json into /opt/pipez and replace /opt/pipez/src with a fresh copy (rm -rf, then cp -r). Otherwise print that the copy is skipped, because pipez's own deploy extracts the tarball directly into /opt/pipez. Then run `cd /opt/pipez && NO_UPDATE_NOTIFIER=1 npm ci --omit=dev --no-audit --no-fund`. Then chown -R root:root and chmod -R a+rX on /opt/pipez/src, /opt/pipez/node_modules and /opt/pipez/package.json /opt/pipez/package-lock.json.\n(f) Run `install -m 0644 \"$SRC/deploy/pipez.service\" /etc/systemd/system/pipez.service`, `systemctl daemon-reload`, `systemctl enable pipez`, `systemctl restart pipez`.\n(g) Loop up to 30 times with sleep 1: code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/healthz || true). On 200, print `pipez is healthy on port 3000` and continue. If it never returns 200, print `journalctl -u pipez -n 50 --no-pager` output and exit 1.\n(h) Print instructions saying that the firewall is not changed and the operator should run e.g. `sudo ufw allow 3000/tcp`. Never actually run ufw or iptables.\n\nNo telemetry, and no outbound hosts other than deb.nodesource.com, the Ubuntu apt mirrors and the npm registry. Quote all variables. If shellcheck is available locally, run it and fix every finding.",
+            "tier": "deep",
+            "depends_on": [],
+            "acceptance": [
+              "deploy/provision.sh exists, is executable, starts with `#!/usr/bin/env bash` and contains `set -euo pipefail`",
+              "deploy/provision.sh checks /etc/os-release for Ubuntu 22.04 or 24.04 and prints a message starting `Unsupported OS:` before exiting 1 otherwise",
+              "deploy/provision.sh references /etc/apt/keyrings/nodesource.gpg and https://deb.nodesource.com/node_22.x, and skips the Node install when the major version is 22",
+              "deploy/provision.sh installs build-essential and python3, and creates user pipez with shell /usr/sbin/nologin only if it does not exist",
+              "deploy/provision.sh runs `npm ci --omit=dev` in /opt/pipez and skips the copy step when its source directory resolves to /opt/pipez",
+              "deploy/provision.sh installs the unit, runs systemctl daemon-reload, enable and restart, then polls http://127.0.0.1:3000/healthz up to 30 times and exits non-zero if it never returns 200",
+              "deploy/provision.sh prints `ufw allow 3000/tcp` as a hint and never runs ufw as a command",
+              "`shellcheck deploy/provision.sh` reports no findings"
+            ]
+          },
+          {
+            "id": "T3",
+            "title": "Write the local SSH deploy wrapper deploy/deploy.sh",
+            "module": "deploy-wrapper",
+            "prompt": "The pipez repo is a Node 22/Express URL shortener. Create deploy/deploy.sh (chmod +x). It starts with `#!/usr/bin/env bash` and `set -euo pipefail` and runs on the operator's workstation.\n\nInput:\n- Usage: `deploy/deploy.sh [HOST] [USER] [SSH_KEY]`. Use HOST=${1:-${DEPLOY_HOST:-}}, USER_=${2:-${DEPLOY_USER:-}}, KEY=${3:-${DEPLOY_SSH_KEY:-}}.\n- `-h` or `--help`: print usage and exit 0.\n- If any value is empty: print usage naming DEPLOY_HOST, DEPLOY_USER and DEPLOY_SSH_KEY to stderr and exit 2.\n- If the KEY file does not exist: print an error and exit 2.\n- Never hard-code any host, user, IP or key path.\n\nSteps:\n1. Resolve REPO_ROOT as the parent of the script's directory. Use SSH options `-i \"$KEY\" -o BatchMode=yes -o StrictHostKeyChecking=accept-new`. The remote staging dir is /tmp/pipez-deploy.\n2. If rsync is installed locally, run rsync -az --delete with -e \"ssh <opts>\" to send package.json, package-lock.json, src/ and deploy/ to USER@HOST:/tmp/pipez-deploy/ (keep the relative layout, e.g. run from REPO_ROOT with --relative). Otherwise run `ssh mkdir -p /tmp/pipez-deploy` and then `scp -r` those paths.\n3. Run `ssh <opts> USER@HOST 'sudo bash /tmp/pipez-deploy/deploy/provision.sh'`. Its failure must fail the script.\n4. Run `curl -sS -o \"$tmp\" -w '%{http_code} %{content_type}' --max-time 10 http://HOST:3000/healthz` (use mktemp and a trap to clean up). Require code 200 and a content type containing application/json. Print the body and `healthz OK` on success. Otherwise print the code, content type and body, and exit 1.\n\nNo telemetry. If shellcheck is available locally, run it and fix every finding.\n\nDo NOT run this script against any real host. The build sandbox has no VM access.",
+            "tier": "standard",
+            "depends_on": [],
+            "acceptance": [
+              "deploy/deploy.sh exists, is executable, starts with `#!/usr/bin/env bash` and contains `set -euo pipefail`",
+              "Running `env -u DEPLOY_HOST -u DEPLOY_USER -u DEPLOY_SSH_KEY bash deploy/deploy.sh` prints a usage message mentioning DEPLOY_HOST, DEPLOY_USER and DEPLOY_SSH_KEY and exits with status 2",
+              "`bash deploy/deploy.sh --help` exits 0 and prints usage",
+              "deploy/deploy.sh runs `sudo bash /tmp/pipez-deploy/deploy/provision.sh` over ssh and checks http://HOST:3000/healthz for a 200 JSON response",
+              "deploy/deploy.sh contains no hard-coded IP address, hostname or key path",
+              "`shellcheck deploy/deploy.sh` reports no findings"
+            ]
+          },
+          {
+            "id": "T4",
+            "title": "Add static deploy-artifact tests test/deploy.test.js",
+            "module": "tests",
+            "prompt": "The pipez repo uses node:test with no dev dependencies, and has 15 existing tests in test/app.test.js and test/app-module.test.js. Do not modify those files or src/.\n\nCreate test/deploy.test.js using only node:test, node:assert/strict, node:fs, node:path and node:child_process. Resolve paths relative to the repo root via __dirname. No network access, and no reliance on shellcheck or systemd-analyze.\n\nTests:\n1. deploy/pipez.service contains each of these as a whole line (trim whitespace):\n   - Description=pipez URL shortener, After=network-online.target, Wants=network-online.target\n   - Type=simple, User=pipez, Group=pipez, WorkingDirectory=/opt/pipez\n   - ExecStart=/usr/bin/node /opt/pipez/src/server.js, Environment=PORT=3000, Environment=DB_PATH=/var/lib/pipez/shortener.db, Environment=NODE_ENV=production\n   - Restart=on-failure, RestartSec=2, StateDirectory=pipez, StateDirectoryMode=0750\n   - NoNewPrivileges=true, ProtectSystem=strict, ProtectHome=true, PrivateTmp=true, ReadWritePaths=/var/lib/pipez\n   - StandardOutput=journal, StandardError=journal, WantedBy=multi-user.target\n   It must also not contain TRUST_PROXY.\n2. deploy/provision.sh and deploy/deploy.sh each have first line `#!/usr/bin/env bash`, contain `set -euo pipefail`, and have an owner-executable mode bit.\n3. provision.sh contains the substrings 22.04, 24.04, /etc/apt/keyrings, node_22.x, npm ci --omit=dev, build-essential, python3, useradd, /usr/sbin/nologin, systemctl daemon-reload, systemctl enable, systemctl restart, http://127.0.0.1:3000/healthz and ufw allow 3000/tcp. No line, after trimming, may start with `ufw ` or `sudo ufw `.\n4. deploy.sh contains DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY and /healthz. Running spawnSync('bash', ['deploy/deploy.sh'], {env: a copy of process.env with those three removed}) gives exit status 2.\n\nCheck the existing package.json `test` script. If it does not already pick up every test/*.test.js file, change only the glob/arguments of that script so it does, keeping zero dev dependencies. Run `npm test`. All tests must pass once deploy/ files from T1 to T3 exist.",
+            "tier": "standard",
+            "depends_on": [
+              "T1",
+              "T2",
+              "T3"
+            ],
+            "acceptance": [
+              "test/deploy.test.js exists and uses only Node built-in modules",
+              "`npm test` passes and reports more than 15 passing tests with 0 failures",
+              "test/app.test.js and test/app-module.test.js are unchanged from tag pipez/c7213225e46a",
+              "package.json still has no devDependencies"
+            ]
+          },
+          {
+            "id": "T5",
+            "title": "Update README with VM deployment, warnings and OPTIONS cleanup",
+            "module": "docs",
+            "prompt": "Edit README.md of the pipez URL shortener (Node 22/Express, SQLite via better-sqlite3, per-IP rate limit of 60/min held in memory). Keep every existing section.\n\nFirst, check and fix the existing content so that it contains:\n- the one-command Docker run `docker build -t pipez . && docker run -p 3000:3000 -v pipez-data:/data pipez`;\n- an env-var table listing PORT (3000), DB_PATH (/data/shortener.db), TRUST_PROXY (false; accepts true/false/hop count/CIDR list/loopback) and BASE_URL;\n- curl examples for POST /shorten, GET /<code> (curl -i) and GET /healthz;\n- a warning that TRUST_PROXY must be set correctly behind a reverse proxy or load balancer;\n- a statement that links are kept forever and the database grows without limit.\n\nThen add a section headed exactly `## Deploying to an Ubuntu VM (systemd)` with:\n- Prerequisites: Ubuntu 22.04 or 24.04; an SSH user with passwordless sudo; outbound internet on the VM for apt (NodeSource, Ubuntu mirrors) and npm; ssh, curl and rsync (or scp) locally.\n- Deploy command, both forms: `deploy/deploy.sh HOST USER ~/.ssh/key` and `DEPLOY_HOST=203.0.113.10 DEPLOY_USER=ubuntu DEPLOY_SSH_KEY=~/.ssh/key deploy/deploy.sh`. Explain that credentials are never committed.\n- What provision.sh does: installs Node 22 from NodeSource, installs build tools, creates the `pipez` user, installs to /opt/pipez, stores data in /var/lib/pipez, starts the systemd unit and checks /healthz.\n- Service env vars: PORT=3000, DB_PATH=/var/lib/pipez/shortener.db, TRUST_PROXY unset (false). Explain how to override them with `sudo systemctl edit pipez`.\n- Operations: `systemctl status pipez` and `journalctl -u pipez` (with -f).\n- Firewall: the operator opens it, e.g. `sudo ufw allow 3000/tcp`. The scripts never change it.\n- Updating: re-run deploy/deploy.sh.\n- Uninstall: `sudo systemctl disable --now pipez`; `sudo rm /etc/systemd/system/pipez.service`; `sudo systemctl daemon-reload`; `sudo userdel pipez`; `sudo rm -rf /opt/pipez`; optionally `sudo rm -rf /var/lib/pipez` (permanently deletes all links); optionally remove /etc/apt/sources.list.d/nodesource.list and /etc/apt/keyrings/nodesource.gpg.\n- Warnings:\n  - It is exposed directly on port 3000 over plain HTTP with no TLS or reverse proxy, so rate limiting uses the socket IP. If you add a proxy later you must set TRUST_PROXY.\n  - /var/lib/pipez/shortener.db is not backed up, can be lost permanently, and grows without limit.\n  - Run only one instance, because the DB is a single file and the rate-limit counters are in memory and reset on restart.\n\nFinally, remove the line `A systemd unit for VM deployments` from the OPTIONS list and keep the other options. Use 203.0.113.x documentation addresses only, never real hosts.",
+            "tier": "standard",
+            "depends_on": [],
+            "acceptance": [
+              "README.md contains the heading `## Deploying to an Ubuntu VM (systemd)`",
+              "README.md contains `deploy/deploy.sh`, `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `systemctl status pipez`, `journalctl -u pipez` and `ufw allow 3000/tcp`",
+              "README.md contains `/var/lib/pipez/shortener.db` with a warning that it is not backed up, can be lost permanently, and grows without limit",
+              "README.md states that only one instance may run and that rate-limit counters reset on restart",
+              "README.md contains uninstall steps including `systemctl disable --now pipez` and `userdel pipez`",
+              "README.md still contains `docker build -t pipez . && docker run -p 3000:3000 -v pipez-data:/data pipez`, an env-var table with PORT, DB_PATH, TRUST_PROXY and BASE_URL, and curl examples for /shorten and /healthz",
+              "README.md does not contain the text `A systemd unit for VM deployments`"
+            ]
+          },
+          {
+            "id": "T6",
+            "title": "Local verification gate: build, tests, lint the unit and scripts, Docker and server smoke",
+            "module": "tests",
+            "prompt": "Verify the pipez repo locally in the sandbox. Do not contact any VM or remote host, and do not run deploy/deploy.sh against a real host.\n\nFrom the repo root, run:\n1. `npm ci --no-audit --no-fund`, then `npm test`. Everything must pass.\n2. `systemd-analyze verify deploy/pipez.service`. Fix real syntax or directive errors in the unit. Messages caused only by the sandbox (missing /usr/bin/node, missing pipez user, no systemd running) are acceptable if the unit content matches its contract.\n3. `shellcheck deploy/provision.sh deploy/deploy.sh`. Fix every finding in the scripts without changing their contracted behaviour.\n4. Server smoke test: start `PORT=3000 DB_PATH=$(mktemp -d)/s.db node src/server.js` in the background, then curl:\n   - GET /healthz: expect 200 {\"status\":\"ok\"};\n   - POST /shorten with {\"url\":\"https://example.com\"}: expect 201 with a 7-char code;\n   - GET /<code>: expect 302 with Location https://example.com.\n   Then send SIGTERM and confirm the process exits.\n5. If docker is available: `docker build -t pipez .`, then `docker run -d -p 3000:3000 pipez`, curl /healthz for 200, and remove the container.\n\nIf a tool (systemd-analyze, shellcheck, docker) is not installed, skip that step; do not install anything. Change src/ only if a genuine defect is found, and keep the API behaviour identical. Re-run `npm test` after any fix.",
+            "tier": "standard",
+            "depends_on": [
+              "T4",
+              "T5"
+            ],
+            "acceptance": [
+              "`npm ci --no-audit --no-fund` exits 0 from the repo root",
+              "`npm test` exits 0 with 0 failing tests, including test/deploy.test.js",
+              "`shellcheck deploy/provision.sh deploy/deploy.sh` exits 0 where shellcheck is installed",
+              "`systemd-analyze verify deploy/pipez.service` reports no syntax or unknown-directive errors where systemd-analyze is installed",
+              "With `node src/server.js` running locally, GET http://127.0.0.1:3000/healthz returns 200 with body {\"status\":\"ok\"}",
+              "No files under src/ differ from tag pipez/c7213225e46a unless a defect fix is accompanied by a test covering it"
+            ]
+          }
+        ],
+        "scaffold_commands": [
+          "mkdir -p deploy",
+          "npm ci --no-audit --no-fund"
+        ],
+        "build_command": "npm ci --no-audit --no-fund",
+        "test_command": "npm test",
+        "deploy": {
+          "target": "vm",
+          "install_commands": [
+            "sudo apt-get update",
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg",
+            "sudo bash deploy/provision.sh"
+          ],
+          "start_command": "sudo systemctl start pipez && exec sudo journalctl -u pipez -f --no-pager -o cat",
+          "port": 3000,
+          "health_path": "/healthz",
+          "env": []
+        }
+      }
+    },
+    {
+      "run_id": "da31df2bfc2a",
+      "stage": "plan",
+      "tier": "deep@medium",
+      "model": "claude-opus-5-5",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 82.15,
+      "input_tokens": 16261,
+      "output_tokens": 10087,
+      "cost": 0.266784,
+      "tasks": 4,
+      "modules": 3,
+      "deploy_target": "vm",
+      "deploy_target_match": true,
+      "task_count_delta": -1,
+      "scaffold_forbidden": false,
+      "has_test_command": true,
+      "plan_chars": 21033,
+      "output": {
+        "architecture": "# pipez: systemd/VM deployment increment\n\n## Baseline (unchanged)\nThis change builds on tag `pipez/c7213225e46a`: Node 22, Express 4, express-rate-limit 7 (in-memory, 60 requests/min per IP, JSON 429 with Retry-After), better-sqlite3 in WAL mode, 7-character base62 codes, `POST /shorten`, `GET /:code` (302), `GET /healthz` returning 200 `{\"status\":\"ok\"}`, the Dockerfile, docker-compose.yml, the MIT LICENSE and 15 passing tests. **No file under `src/`, `Dockerfile`, `.dockerignore`, `docker-compose.yml`, `LICENSE` or the existing test files may change.**\n\n## New components\n1. **`deploy/pipez.service`**: a systemd unit. It runs `/usr/bin/node src/server.js` as the system user `pipez` (non-login) from `/opt/pipez`, with `PORT=3000`, `DB_PATH=/var/lib/pipez/shortener.db` and `NODE_ENV=production`. TRUST_PROXY is not set. Hardening is NoNewPrivileges, ProtectSystem=strict, ReadWritePaths=/var/lib/pipez, PrivateTmp and StateDirectory=pipez. It also sets Restart=on-failure and WantedBy=multi-user.target.\n2. **`deploy/install.sh`**: an idempotent bash provisioning script that runs as root or via sudo on Ubuntu 22.04 or 24.04. In order, it:\n   - checks the OS release;\n   - installs Node 22 from NodeSource (key in /etc/apt/keyrings), skipping this if Node 22 is already present;\n   - installs build-essential and python3;\n   - creates the `pipez` user and the /opt/pipez and /var/lib/pipez directories;\n   - copies the repo into /opt/pipez and runs `npm ci --omit=dev`;\n   - installs the unit, runs daemon-reload, then enable and restart;\n   - polls `http://127.0.0.1:3000/healthz` for up to 30 s;\n   - prints a firewall reminder.\n3. **README section** 'Deploy to an Ubuntu VM (systemd)', plus an updated OPTIONS list.\n4. **`test/deploy.test.js`**: dependency-free node:test checks on the static contents of the unit file and install.sh.\n\n## Data flow on the VM\nClient \u2192 TCP :3000 (plain HTTP, no proxy) \u2192 node `src/server.js` under systemd \u2192 better-sqlite3 \u2192 `/var/lib/pipez/shortener.db`. Because clients connect directly, rate limiting uses the real socket IP.\n\n## How each decision is honoured\n- **deployment.vm_access=live-deploy**: pipez provisions the VM itself and runs the `deploy` spec (target vm, user `etl` with passwordless sudo, NodeSource Node 22, `npm ci`, foreground `node src/server.js`, port 3000, `/healthz`). No task touches a host. No SSH, Ansible or remote tooling and no SSH details appear in the repo. install.sh never hardcodes `etl`; it works under any sudo-capable user.\n- **hosting.target**: Docker stays as it is, and the VM target is added through the systemd unit and install.sh.\n- **os_version 22.04/24.04**: install.sh reads /etc/os-release, requires ID=ubuntu and VERSION_ID in {22.04, 24.04}, and otherwise exits non-zero with a clear message.\n- **node_install=nodesource-apt**: the key goes to /etc/apt/keyrings/nodesource.gpg, the source line is `deb [signed-by=...] https://deb.nodesource.com/node_22.x nodistro main`, and `apt-get install -y nodejs` follows.\n- **provisioning=bash-script**: a single script with no configuration-management tool.\n- **network.exposure=direct-port-3000**: there is no TLS or proxy and TRUST_PROXY stays unset. install.sh does not change the firewall. It prints a reminder, and if ufw is active it prints `sudo ufw allow 3000/tcp` without running it.\n- **storage.backup=none and data.retention=forever**: the README says so explicitly. install.sh never deletes /var/lib/pipez.\n- **MIT, no telemetry, no auth, SQLite single file, Node+Express, no CI**: unchanged. The tests assert that install.sh contains no telemetry, ssh or ansible references.\n- The **existing 15 tests** keep passing, and the new tests are added in a separate file.\n\n## Note on the deploy spec versus the systemd unit\npipez's own deploy runs `node src/server.js` in the foreground as `etl` from `/opt/pipez`, with `DB_PATH=/var/lib/pipez/shortener.db` (directory created and chowned to the deploy user by install_commands). This does not conflict with the unit, which an operator installs separately with `sudo bash deploy/install.sh`. The deploy spec deliberately does not run install.sh, because that would bind port 3000 through systemd and clash with the foreground start_command.\n\n## OPTIONS (not built)\n- Optionally run shellcheck on install.sh if it is available locally. It is not added as a dependency.\n- Possible later work: a reverse proxy with TLS, a backup timer and a link-retention job.",
+        "stack": [
+          "Node.js 22 LTS (existing)",
+          "Express 4 (existing)",
+          "express-rate-limit 7 (existing)",
+          "better-sqlite3 11 (existing)",
+          "node:test + node:fs for the new static tests (no dev dependencies)",
+          "systemd unit file",
+          "bash (install.sh) for Ubuntu 22.04 and 24.04",
+          "NodeSource apt repository, node_22.x",
+          "Docker (existing, unchanged)",
+          "MIT license"
+        ],
+        "repo_layout": "```\npipez/\n\u251c\u2500\u2500 package.json          # unchanged unless the test script must be widened to include test/deploy.test.js\n\u251c\u2500\u2500 package-lock.json\n\u251c\u2500\u2500 src/                  # UNCHANGED (config, codes, db, app, server)\n\u251c\u2500\u2500 test/\n\u2502   \u251c\u2500\u2500 app.test.js        # unchanged\n\u2502   \u251c\u2500\u2500 app-module.test.js # unchanged\n\u2502   \u2514\u2500\u2500 deploy.test.js     # NEW: static checks on deploy/ files\n\u251c\u2500\u2500 deploy/\n\u2502   \u251c\u2500\u2500 pipez.service      # NEW: systemd unit\n\u2502   \u2514\u2500\u2500 install.sh         # NEW: idempotent Ubuntu installer (mode 0755)\n\u251c\u2500\u2500 Dockerfile            # unchanged\n\u251c\u2500\u2500 .dockerignore         # unchanged\n\u251c\u2500\u2500 docker-compose.yml    # unchanged\n\u251c\u2500\u2500 README.md             # + 'Deploy to an Ubuntu VM (systemd)' section; OPTIONS updated\n\u251c\u2500\u2500 LICENSE               # unchanged (MIT)\n\u2514\u2500\u2500 .gitignore            # unchanged\n```",
+        "modules": [
+          {
+            "name": "deploy",
+            "path": "deploy/",
+            "purpose": "Holds the systemd unit and the idempotent Ubuntu install script that deploy pipez as a systemd service with Node 22 from NodeSource.",
+            "depends_on": [],
+            "contract": "FILES OWNED: deploy/pipez.service, deploy/install.sh (git mode 100755).\n\n**pipez.service** must contain these exact lines:\n- `[Unit]` with `Description=pipez URL shortener`, `After=network-online.target` and `Wants=network-online.target`.\n- `[Service]` with:\n  - `Type=simple`, `User=pipez`, `Group=pipez`, `WorkingDirectory=/opt/pipez`\n  - `ExecStart=/usr/bin/node src/server.js`\n  - `Environment=PORT=3000`, `Environment=DB_PATH=/var/lib/pipez/shortener.db`, `Environment=NODE_ENV=production`\n  - `Restart=on-failure`, `RestartSec=2`, `StateDirectory=pipez`\n  - `NoNewPrivileges=true`, `ProtectSystem=strict`, `ReadWritePaths=/var/lib/pipez`, `PrivateTmp=true`\n- `[Install]` with `WantedBy=multi-user.target`.\n- No TRUST_PROXY line.\n\n**install.sh**:\n- Line 1 is `#!/usr/bin/env bash`. The first non-comment command is `set -euo pipefail`.\n- If EUID != 0 it re-execs itself with sudo: `exec sudo -E bash \"$0\" \"$@\"`. It never names a specific invoking user.\n- REPO_ROOT is `$(cd \"$(dirname \"${BASH_SOURCE[0]}\")/..\" && pwd)`.\n- It sources /etc/os-release. If ID is not ubuntu, or VERSION_ID is not 22.04 or 24.04, it prints `Unsupported OS: ... (supported: Ubuntu 22.04, 24.04)` to stderr and exits 1.\n- It sets `DEBIAN_FRONTEND=noninteractive`.\n- It runs `apt-get install -y ca-certificates curl gnupg build-essential python3`.\n- If `node -v` does not start with `v22.`, it:\n  - creates the directory /etc/apt/keyrings with mode 0755;\n  - pipes `curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key` into `gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg`;\n  - writes `deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main` to /etc/apt/sources.list.d/nodesource.list;\n  - runs apt-get update, then `apt-get install -y nodejs`.\n- It creates the user `pipez` if missing with `useradd --system --home-dir /var/lib/pipez --shell /usr/sbin/nologin --user-group pipez`.\n- It runs `install -d -o pipez -g pipez -m 0750 /var/lib/pipez` and `install -d /opt/pipez`.\n- It copies the app by staging only package.json, package-lock.json, src/, LICENSE and README.md from REPO_ROOT into /opt/pipez. Stale src is replaced (rm -rf /opt/pipez/src first). Database files, node_modules and .git are never copied. /var/lib/pipez is never removed.\n- It runs `cd /opt/pipez && npm ci --omit=dev --no-audit --no-fund`, then `chown -R root:root /opt/pipez` (readable by pipez).\n- It installs the unit with `install -m 0644 \"$REPO_ROOT/deploy/pipez.service\" /etc/systemd/system/pipez.service`, then runs `systemctl daemon-reload`, `systemctl enable pipez` and `systemctl restart pipez`.\n- It polls `curl -fsS http://127.0.0.1:3000/healthz` once a second for up to 30 tries. On success it prints OK. On failure it prints `journalctl -u pipez -n 50 --no-pager` and exits 1.\n- It prints a reminder that TCP port 3000 must be reachable. If `ufw status` reports active, it prints (does not run) `sudo ufw allow 3000/tcp`.\n- It contains none of these substrings (case-insensitive): ssh, ansible, telemetry, analytics.\n- It passes `bash -n`.\n\nTESTED BY: test/deploy.test.js (static checks) and `bash -n deploy/install.sh`."
+          },
+          {
+            "name": "docs",
+            "path": "README.md",
+            "purpose": "User documentation. Adds the VM/systemd deployment section and removes the systemd unit from the unbuilt options.",
+            "depends_on": [
+              "deploy"
+            ],
+            "contract": "FILES OWNED: README.md.\n\nAll existing content stays, including the Docker one-command run, the env table, curl examples, TRUST_PROXY warning and unbounded-growth note.\n\nAdd a section headed exactly `## Deploy to an Ubuntu VM (systemd)` containing:\n- the commands `git clone <repo> pipez && cd pipez` (or a copied tarball) and `sudo bash deploy/install.sh`;\n- supported releases Ubuntu 22.04 and 24.04;\n- that Node 22 is installed from the NodeSource apt repo;\n- that the service listens on plain HTTP port 3000 with no TLS or reverse proxy, that TRUST_PROXY is left unset, and that the firewall must allow 3000/tcp (the script does not change the firewall);\n- the data path `/var/lib/pipez/shortener.db`;\n- that there are no backups, so data is lost if the disk fails;\n- that links are kept forever, so disk use must be watched;\n- that re-running the script upgrades the code, restarts the service and keeps the database;\n- the commands `systemctl status pipez`, `journalctl -u pipez` and `curl localhost:3000/healthz`.\n\nRemove the systemd unit entry from the 'OPTIONS (not built)' list (or equivalent). No SSH, Ansible or host details anywhere.\n\nTESTED BY: manual review, plus a grep in the verification task."
+          },
+          {
+            "name": "deploy-tests",
+            "path": "test/deploy.test.js",
+            "purpose": "Dependency-free node:test static checks for the deploy files.",
+            "depends_on": [
+              "deploy"
+            ],
+            "contract": "FILES OWNED: test/deploy.test.js. It may also own the `scripts.test` entry in package.json, but only if the current script would not pick up test/deploy.test.js.\n\nUses only node:test, node:assert/strict, node:fs and node:path, with paths resolved from __dirname/.. . Tests:\n- (a) deploy/pipez.service exists and contains the lines `ExecStart=/usr/bin/node src/server.js`, `Environment=DB_PATH=/var/lib/pipez/shortener.db` and `User=pipez`, and contains no `TRUST_PROXY`.\n- (b) deploy/install.sh exists, its first line matches `/^#!(\\/usr\\/bin\\/env bash|\\/bin\\/bash)/`, and it contains `set -euo pipefail`.\n- (c) install.sh contains `nodesource` and `node_22.x`.\n- (d) install.sh does not match `/ssh|ansible|telemetry|analytics/i`.\n\nRun by `npm test` together with the existing 15 tests, which must stay unchanged and passing."
+          }
+        ],
+        "tasks": [
+          {
+            "id": "T1",
+            "title": "Write systemd unit and idempotent install.sh",
+            "module": "deploy",
+            "prompt": "In the existing pipez repo (Node 22/Express URL shortener; do NOT modify src/, Dockerfile, docker-compose.yml, LICENSE or existing tests), create `deploy/pipez.service` and `deploy/install.sh` exactly per the `deploy` module contract. Make install.sh executable (`chmod +x`; ensure git records mode 100755).\n\nUnit requirements:\n- user pipez, WorkingDirectory /opt/pipez, ExecStart=/usr/bin/node src/server.js;\n- Environment PORT=3000, DB_PATH=/var/lib/pipez/shortener.db, NODE_ENV=production, and no TRUST_PROXY;\n- Restart=on-failure, StateDirectory=pipez, NoNewPrivileges=true, ProtectSystem=strict, ReadWritePaths=/var/lib/pipez, PrivateTmp=true, WantedBy=multi-user.target.\n\ninstall.sh requirements, in order:\n1. bash shebang and `set -euo pipefail`.\n2. Re-exec via sudo if not root; never hardcode a username.\n3. Check that the release is Ubuntu 22.04 or 24.04, otherwise print a clear error and exit 1.\n4. Install apt prerequisites (ca-certificates curl gnupg build-essential python3) non-interactively.\n5. If `node -v` is not v22.x, install Node 22 from NodeSource: key at /etc/apt/keyrings/nodesource.gpg via gpg --dearmor --yes, source `https://deb.nodesource.com/node_22.x nodistro main`, then apt-get install -y nodejs.\n6. Create the system user pipez (nologin) if absent, /var/lib/pipez (owned by pipez, mode 0750) and /opt/pipez.\n7. Copy package.json, package-lock.json, src/, LICENSE and README.md from the repo root (resolved from BASH_SOURCE) into /opt/pipez, replacing the old src. Never copy *.db, node_modules or .git, and never delete /var/lib/pipez.\n8. Run `npm ci --omit=dev --no-audit --no-fund` in /opt/pipez.\n9. Install the unit to /etc/systemd/system, then daemon-reload, enable and restart.\n10. Poll http://127.0.0.1:3000/healthz with curl -fsS for up to 30 s. On failure, dump `journalctl -u pipez -n 50 --no-pager` and exit 1.\n11. Print the port-3000 firewall reminder. If ufw is active, print (don't run) `sudo ufw allow 3000/tcp`.\n\nThe script must not contain the substrings ssh, ansible, telemetry or analytics in any case (watch words like 'ssh' inside other tokens). Do not run the script; you are in a sandbox. Validate with `bash -n deploy/install.sh`, and with `shellcheck deploy/install.sh` if it is installed.",
+            "tier": "deep",
+            "depends_on": [],
+            "acceptance": [
+              "deploy/pipez.service exists and contains the lines `User=pipez`, `WorkingDirectory=/opt/pipez`, `ExecStart=/usr/bin/node src/server.js`, `Environment=DB_PATH=/var/lib/pipez/shortener.db`, `Environment=PORT=3000`, `Environment=NODE_ENV=production`, `Restart=on-failure`, `NoNewPrivileges=true`, `ProtectSystem=strict`, `ReadWritePaths=/var/lib/pipez`, `PrivateTmp=true` and `WantedBy=multi-user.target`",
+              "deploy/pipez.service contains no TRUST_PROXY line",
+              "deploy/install.sh starts with a bash shebang, contains `set -euo pipefail`, and `bash -n deploy/install.sh` exits 0",
+              "deploy/install.sh references /etc/apt/keyrings, nodesource and node_22.x, checks /etc/os-release for 22.04 and 24.04, and polls http://127.0.0.1:3000/healthz",
+              "`grep -iE 'ssh|ansible|telemetry|analytics' deploy/install.sh` returns no matches",
+              "deploy/install.sh is executable (git mode 100755) and contains no hardcoded `etl`",
+              "No files under src/, and neither Dockerfile nor docker-compose.yml, are modified"
+            ]
+          },
+          {
+            "id": "T2",
+            "title": "Add static node:test checks for deploy files",
+            "module": "deploy-tests",
+            "prompt": "Create `test/deploy.test.js` in the pipez repo using only node:test, node:assert/strict, node:fs and node:path. Resolve paths from `path.join(__dirname, '..')`. Write four tests:\n- (a) deploy/pipez.service exists and contains the lines `ExecStart=/usr/bin/node src/server.js`, `Environment=DB_PATH=/var/lib/pipez/shortener.db` and `User=pipez`, and contains no TRUST_PROXY.\n- (b) deploy/install.sh exists, its first line matches /^#!(\\/usr\\/bin\\/env bash|\\/bin\\/bash)/, and it includes `set -euo pipefail`.\n- (c) install.sh includes `nodesource` and `node_22.x`.\n- (d) install.sh does not match /ssh|ansible|telemetry|analytics/i.\n\nInspect package.json `scripts.test`. If it would not run test/deploy.test.js (e.g. it lists explicit files), widen it minimally, e.g. to `node --test test/`. Do not change existing tests or src/. The deploy files are written in parallel by another task against the deploy module contract, so write your assertions against that contract.",
+            "tier": "standard",
+            "depends_on": [],
+            "acceptance": [
+              "test/deploy.test.js exists and imports only node: built-in modules",
+              "package.json has no new dependencies or devDependencies",
+              "`npm test` runs test/deploy.test.js in addition to the existing app tests",
+              "Existing test files test/app.test.js and test/app-module.test.js are unchanged"
+            ]
+          },
+          {
+            "id": "T3",
+            "title": "README: Deploy to an Ubuntu VM (systemd) section",
+            "module": "docs",
+            "prompt": "Edit README.md in the pipez repo. Keep all existing content; this includes the Docker one-command run, env table, curl examples, TRUST_PROXY warning and unbounded-growth note.\n\nAdd a section headed exactly `## Deploy to an Ubuntu VM (systemd)` that covers:\n- getting the repo onto the VM (clone or copied tarball) and running `sudo bash deploy/install.sh` (works as any sudo-capable user);\n- supported releases Ubuntu 22.04 and 24.04;\n- that Node 22 is installed from the NodeSource apt repo, and what the script does (user `pipez`, /opt/pipez, /var/lib/pipez, systemd unit, health check);\n- plain HTTP on port 3000 with no TLS or reverse proxy, TRUST_PROXY left unset, and the firewall note (3000/tcp must be open; the script does not change the firewall and prints the ufw command if ufw is active);\n- the data path `/var/lib/pipez/shortener.db`;\n- that there are no backups, so data is lost if the disk fails;\n- that links are kept forever, so disk use must be watched;\n- that re-running the script upgrades and restarts while keeping the database;\n- the commands `systemctl status pipez`, `journalctl -u pipez` and `curl localhost:3000/healthz`.\n\nRemove the systemd unit item from the 'OPTIONS (not built)' list or equivalent text. Do not mention SSH, Ansible or any host or IP details.",
+            "tier": "standard",
+            "depends_on": [],
+            "acceptance": [
+              "README.md contains the heading `## Deploy to an Ubuntu VM (systemd)`",
+              "README.md mentions `sudo bash deploy/install.sh`, `22.04`, `24.04`, `/var/lib/pipez/shortener.db`, `systemctl status pipez`, `journalctl -u pipez` and `curl localhost:3000/healthz`",
+              "README.md states there are no backups and that links are kept forever, so disk use must be watched",
+              "README.md states the service uses plain HTTP on port 3000 without TLS and that port 3000 must be open in the firewall",
+              "The systemd unit is no longer listed as unbuilt in README.md",
+              "`grep -i ansible README.md` and `grep -iw ssh README.md` return no matches",
+              "README.md still contains the Docker one-command run and the TRUST_PROXY warning"
+            ]
+          },
+          {
+            "id": "T4",
+            "title": "Verification gate: build, tests, shell syntax",
+            "module": "deploy-tests",
+            "prompt": "Run these from the repo root:\n1. `npm ci --no-audit --no-fund`\n2. `npm test`\n3. `bash -n deploy/install.sh`\n4. `shellcheck deploy/install.sh`, only if shellcheck is installed.\n\nAlso confirm:\n- `git diff pipez/c7213225e46a -- src Dockerfile docker-compose.yml LICENSE test/app.test.js test/app-module.test.js` is empty;\n- `grep -iE 'ssh|ansible|telemetry|analytics' deploy/install.sh` returns nothing.\n\nFix only minor defects inside deploy/, test/deploy.test.js or README.md if something fails. Do not deploy or contact any host.",
+            "tier": "standard",
+            "depends_on": [
+              "T1",
+              "T2",
+              "T3"
+            ],
+            "acceptance": [
+              "`npm test` exits 0 with at least 19 passing tests and 0 failing",
+              "`bash -n deploy/install.sh` exits 0",
+              "`git diff pipez/c7213225e46a -- src Dockerfile docker-compose.yml LICENSE` is empty",
+              "`npm ci --no-audit --no-fund` exits 0"
+            ]
+          }
+        ],
+        "scaffold_commands": [
+          "npm ci --no-audit --no-fund",
+          "mkdir -p deploy"
+        ],
+        "build_command": "npm ci --no-audit --no-fund",
+        "test_command": "npm test",
+        "deploy": {
+          "target": "vm",
+          "install_commands": [
+            "sudo apt-get update",
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg build-essential python3",
+            "sudo install -d -m 0755 /etc/apt/keyrings",
+            "curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | sudo gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg",
+            "echo 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main' | sudo tee /etc/apt/sources.list.d/nodesource.list",
+            "sudo apt-get update",
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs",
+            "node -v | grep -q '^v22\\.'",
+            "sudo chown -R \"$(id -u):$(id -g)\" /opt/pipez",
+            "sudo install -d -o \"$(id -u)\" -g \"$(id -g)\" -m 0750 /var/lib/pipez",
+            "npm ci --omit=dev --no-audit --no-fund"
+          ],
+          "start_command": "node src/server.js",
+          "port": 3000,
+          "health_path": "/healthz",
+          "env": [
+            {
+              "name": "PORT",
+              "value": "3000"
+            },
+            {
+              "name": "DB_PATH",
+              "value": "/var/lib/pipez/shortener.db"
+            },
+            {
+              "name": "NODE_ENV",
+              "value": "production"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

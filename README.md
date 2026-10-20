@@ -162,3 +162,6 @@ the benchmark. To decide where to allow it, replay stored runs through the tiers
 
 It needs `ANTHROPIC_API_KEY` and `PIPEZ_LOCAL_*` in the environment, prints the estimated spend
 first and requires `--yes`; the source DB is copied, never modified.
+
+## Review fault injection (test hook)
+`PIPEZ_REVIEW_INJECT_WRONG="<substring>"` (off by default, never set in normal use): in review round 1 only, the first verdict whose claim contains the substring (case-insensitive) is overridden to `wrong` with an `INJECTED BY PIPEZ_REVIEW_INJECT_WRONG (test hook)` correction, logged as `review_injected` (`review_inject_miss` if nothing matches) and shown with an `injected` badge. It exercises the fixer -> integrate -> redeploy -> re-review loop on a real run; round 2 is never injected.

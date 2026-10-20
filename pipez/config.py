@@ -225,3 +225,6 @@ VERIFY_AUTO = os.environ.get("PIPEZ_VERIFY_AUTO", "1") == "1"
 VERIFY_TIER = os.environ.get("PIPEZ_VERIFY_TIER", "standard")
 # Fix rounds after a failed acceptance review (fixer -> re-integrate -> fresh deploy -> review).
 VERIFY_ROUNDS = int(os.environ.get("PIPEZ_VERIFY_ROUNDS", "1"))
+# TEST HOOK (task 28), never set in normal use: in review round 1 the first verdict whose
+# claim contains this substring (case-insensitive) is overridden to `wrong`, to exercise the fix round.
+REVIEW_INJECT_WRONG = os.environ.get("PIPEZ_REVIEW_INJECT_WRONG", "")

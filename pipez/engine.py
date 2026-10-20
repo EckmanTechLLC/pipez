@@ -611,6 +611,7 @@ class Engine:
                             {"tasks": nt, "modules": nm,
                              "max_tasks": config.PLAN_MAX_TASKS,
                              "max_modules": config.PLAN_MAX_MODULES})
+            warnings.extend(self._plan_rule_warnings(plan))
             self.db.set_plan(run_id, plan, {
                 "warnings": warnings,
                 "tier": tier_name, "model": usage.get("model"),
@@ -679,6 +680,43 @@ class Engine:
         if out["target"] == "vm" and (not out["start_command"]
                                       or not 0 < port < 65536):
             out["target"] = "none"      # cannot deploy without a command and a port
+        return out
+
+    # Phrases implying execution against a host (not mere mention of deploy).
+    _DEPLOY_RE = re.compile(
+        r"\b(ssh|scp)\s+(to|into)?\s*\S*(vm|host|server)"
+        r"|\b(live|real|remote)\s+(\w+\s+)?(vm|host|server|machine)\b"
+        r"|\blive\s+(re)?deploy"
+        r"|\bredeploy\b"
+        r"|\bdeploy(s|ed|ing)?\s+(it\s+)?(to|on)\s+(the\s+|an?\s+)?(\w+\s+){0,3}(vm|host|server)\b"
+        r"|\bon\s+the\s+(vm|host|server)\b"
+        r"|\bsmoke[- ]?test(s|ing)?\s+(the\s+)?(live|deployed|running)\b", re.I)
+    # Tasks whose title starts with these verbs are file-authoring: skipped.
+    _AUTHOR_RE = re.compile(
+        r"^\s*(write|author|add|create|update|document|readme)\b", re.I)
+    _PROCESS_RE = re.compile(
+        r"\b(the report|build report|git diff|marked (as )?NOT RUN|"
+        r"tool unavailable|shellcheck)\b", re.I)
+
+    def _plan_rule_warnings(self, plan: dict) -> list:
+        """Non-fatal planner-rule checks (false positives are only warnings).
+        task_touches_deployment: title/prompt mentions deploy/ssh/etc. and is
+        not file-authoring (title starting Write/Author/Add/Create/Update/
+        Document/README).
+        process_acceptance_criteria: a criterion about the builder's report
+        or process rather than the product."""
+        out = []
+        for t in plan.get("tasks") or []:
+            title = t.get("title") or ""
+            text = "%s\n%s" % (title, t.get("prompt") or "")
+            if not self._AUTHOR_RE.search(title) and self._DEPLOY_RE.search(text):
+                out.append("task_touches_deployment: task %s (%s) looks "
+                           "like a deployment/remote step; pipez deploys "
+                           "after integration" % (t.get("id"), title))
+            for a in t.get("acceptance") or []:
+                if self._PROCESS_RE.search(a):
+                    out.append("process_acceptance_criteria: task %s: %s"
+                               % (t.get("id"), a))
         return out
 
     def _validate_plan(self, run_id: str, plan: dict) -> dict:
@@ -1675,6 +1713,7 @@ class Engine:
                         for v in data if isinstance(v, dict)]
             if not verdicts:
                 raise LLMError("reviewer produced no verdicts")
+            verdicts = self._inject_wrong(run_id, rnd, verdicts)
             verification = ("failed" if any(v["verdict"] == "wrong" for v in verdicts)
                             else "passed")
         except Exception as e:      # CancelledError is not an Exception
@@ -1688,6 +1727,24 @@ class Engine:
         self._publish_verifications(run_id)
         self._publish_run(run_id)
         return verification
+
+    def _inject_wrong(self, run_id: str, rnd: int, verdicts: list) -> list:
+        """TEST HOOK (PIPEZ_REVIEW_INJECT_WRONG): in review round 1 only, force the
+        first verdict whose claim contains the substring to `wrong`."""
+        needle = (config.REVIEW_INJECT_WRONG or "").strip().lower()
+        if not needle or rnd != 1:
+            return verdicts
+        key = "run:" + run_id
+        for v in verdicts:
+            if needle in v["claim"].lower():
+                orig = v["note"] or v["claim"]
+                v["verdict"] = "wrong"
+                v["correction"] = ("INJECTED BY PIPEZ_REVIEW_INJECT_WRONG (test hook): %s" % orig)
+                v["injected"] = True
+                self.db.log(key, "review_injected", {"claim": v["claim"], "round": rnd})
+                return verdicts
+        self.db.log(key, "review_inject_miss", {"substring": config.REVIEW_INJECT_WRONG})
+        return verdicts
 
     async def reverify(self, run_id: str) -> dict:
         """Re-run the acceptance review of a done plan run whose build sandbox

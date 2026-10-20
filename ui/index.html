@@ -730,7 +730,7 @@ function renderPanel() {
                   : d.verdict === "wrong" ? "s-failed" : "s-running";
         let note = esc(d.note);
         if (d.correction) note += `<br><b>correction:</b> ${esc(d.correction)}`;
-        html += `<tr><td>${esc(d.claim)}</td><td class="${cls}">${esc(d.verdict)}</td><td>${note}</td></tr>`;
+        html += `<tr><td>${esc(d.claim)}</td><td class="${cls}">${esc(d.verdict)}${d.injected ? ' <span class="badge">injected</span>' : ''}</td><td>${note}</td></tr>`;
       }
       html += `</tbody></table>`;
     }
