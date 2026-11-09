@@ -25,35 +25,115 @@ MODEL_TIERS = {
     "light":    {"provider": "anthropic", "model": os.environ.get("PIPEZ_MODEL_LIGHT", "claude-haiku-5-5"),    "effort": os.environ.get("PIPEZ_EFFORT_LIGHT", "low")},
 }
 
-# Local tier: an OpenAI-compatible endpoint (e.g. vLLM serving qwen3). The
-# tier exists only when PIPEZ_LOCAL_BASE_URL is set.
+# Local tiers: OpenAI-compatible endpoints (e.g. vLLM). `local` (the coder,
+# Qwen-style, `enable_thinking`) exists only when PIPEZ_LOCAL_BASE_URL is set;
+# `local_reason` (the reasoner, gpt-oss-style, `reasoning_effort`) only when
+# PIPEZ_LOCAL_REASON_BASE_URL is set.
+LOCAL_TIERS = ("local", "local_reason")
 LOCAL_BASE_URL = os.environ.get("PIPEZ_LOCAL_BASE_URL", "")
 LOCAL_MODEL = os.environ.get("PIPEZ_LOCAL_MODEL", "")
 LOCAL_API_KEY = os.environ.get("PIPEZ_LOCAL_API_KEY", "")
 LOCAL_TIMEOUT = float(os.environ.get("PIPEZ_LOCAL_TIMEOUT", "600"))
 LOCAL_TEMPERATURE = float(os.environ.get("PIPEZ_LOCAL_TEMPERATURE", "0.2"))
 LOCAL_THINKING = os.environ.get("PIPEZ_LOCAL_THINKING", "0") == "1"
-# Stages whose calls may start on `local` (intake, brief, plan, decide,
-# synthesize). Empty (default): `local` is never auto-selected; it stays
+
+
+def _effort(name: str):
+    v = os.environ.get(name, "").strip().lower()
+    return v if v in ("low", "medium", "high") else None
+
+
+STRUCTURED_MODES = ("json_schema", "json_object", "prompt")
+
+
+def _structured(name: str, default: str) -> str:
+    v = os.environ.get(name, "").strip().lower()
+    if not v:
+        return default
+    if v not in STRUCTURED_MODES:
+        logging.getLogger(__name__).warning(
+            "ignoring invalid %s=%r (allowed: %s); using %s",
+            name, v, ", ".join(STRUCTURED_MODES), default)
+        return default
+    return v
+
+
+LOCAL_STRUCTURED = _structured("PIPEZ_LOCAL_STRUCTURED", "json_schema")
+LOCAL_REASON_STRUCTURED = _structured("PIPEZ_LOCAL_REASON_STRUCTURED", "json_object")
+LOCAL_REASONING_EFFORT = _effort("PIPEZ_LOCAL_REASONING_EFFORT")
+LOCAL_REASON_BASE_URL = os.environ.get("PIPEZ_LOCAL_REASON_BASE_URL", "")
+LOCAL_REASON_MODEL = os.environ.get("PIPEZ_LOCAL_REASON_MODEL", "")
+# Key, timeout and temperature fall back to the `local` values when unset.
+LOCAL_REASON_API_KEY = os.environ.get("PIPEZ_LOCAL_REASON_API_KEY") or LOCAL_API_KEY
+LOCAL_REASON_TIMEOUT = float(os.environ.get("PIPEZ_LOCAL_REASON_TIMEOUT") or LOCAL_TIMEOUT)
+LOCAL_REASON_TEMPERATURE = float(
+    os.environ.get("PIPEZ_LOCAL_REASON_TEMPERATURE") or LOCAL_TEMPERATURE)
+LOCAL_REASON_THINKING = os.environ.get("PIPEZ_LOCAL_REASON_THINKING", "0") == "1"
+LOCAL_REASON_REASONING_EFFORT = _effort("PIPEZ_LOCAL_REASON_REASONING_EFFORT")
+# Per-call output cap for local tiers (reasoning models fill their context if uncapped).
+LOCAL_MAX_TOKENS = int(os.environ.get("PIPEZ_LOCAL_MAX_TOKENS") or "16000")
+LOCAL_REASON_MAX_TOKENS = int(os.environ.get("PIPEZ_LOCAL_REASON_MAX_TOKENS")
+                              or LOCAL_MAX_TOKENS)
+
+
+def _stages(name: str) -> list:
+    return [s.strip() for s in os.environ.get(name, "").split(",") if s.strip()]
+
+
+# Stages whose calls may start on a local tier (intake, brief, plan, decide,
+# synthesize). Empty (default): the tier is never auto-selected; it stays
 # usable by an explicit task tier override and by the benchmark.
-LOCAL_ALLOWED_STAGES = [s.strip() for s in
-                        os.environ.get("PIPEZ_LOCAL_STAGES", "").split(",")
-                        if s.strip()]
+LOCAL_ALLOWED_STAGES = _stages("PIPEZ_LOCAL_STAGES")
+LOCAL_REASON_ALLOWED_STAGES = _stages("PIPEZ_LOCAL_REASON_STAGES")
+
+
+def is_local(name) -> bool:
+    return name in LOCAL_TIERS
+
+
+def tier_allowed(tier: str, stage: str) -> bool:
+    """True when local `tier` exists and may be auto-selected for `stage`."""
+    if tier not in MODEL_TIERS:
+        return False
+    stages = LOCAL_REASON_ALLOWED_STAGES if tier == "local_reason" else LOCAL_ALLOWED_STAGES
+    return stage in stages
 
 
 def local_allowed(stage: str) -> bool:
     """True when `local` exists and may be auto-selected for `stage`."""
-    return "local" in MODEL_TIERS and stage in LOCAL_ALLOWED_STAGES
+    return tier_allowed("local", stage)
 
 
 def offered_tiers(stage: str) -> list:
     """The tier names a planner/decide prompt may offer for `stage`."""
-    return [t for t in MODEL_TIERS if t != "local" or local_allowed(stage)]
+    return [t for t in MODEL_TIERS if not is_local(t) or tier_allowed(t, stage)]
+
+
+def stage_tier(stage: str, default: str) -> str:
+    """Tier a stage starts on: `local_reason` if allowed, else `local` if
+    allowed, else `default`."""
+    for t in ("local_reason", "local"):
+        if tier_allowed(t, stage):
+            return t
+    return default
 
 
 if LOCAL_BASE_URL:
-    MODEL_TIERS["local"] = {"provider": "openai_compat", "model": LOCAL_MODEL,
-                            "effort": "low", "base_url": LOCAL_BASE_URL}
+    MODEL_TIERS["local"] = {
+        "provider": "openai_compat", "model": LOCAL_MODEL, "effort": "low",
+        "base_url": LOCAL_BASE_URL, "api_key": LOCAL_API_KEY,
+        "timeout": LOCAL_TIMEOUT, "temperature": LOCAL_TEMPERATURE,
+        "thinking": LOCAL_THINKING, "reasoning_effort": LOCAL_REASONING_EFFORT,
+        "max_tokens": LOCAL_MAX_TOKENS, "structured": LOCAL_STRUCTURED}
+if LOCAL_REASON_BASE_URL:
+    MODEL_TIERS["local_reason"] = {
+        "provider": "openai_compat", "model": LOCAL_REASON_MODEL, "effort": "low",
+        "base_url": LOCAL_REASON_BASE_URL, "api_key": LOCAL_REASON_API_KEY,
+        "timeout": LOCAL_REASON_TIMEOUT, "temperature": LOCAL_REASON_TEMPERATURE,
+        "thinking": LOCAL_REASON_THINKING,
+        "reasoning_effort": LOCAL_REASON_REASONING_EFFORT,
+        "max_tokens": LOCAL_REASON_MAX_TOKENS,
+        "structured": LOCAL_REASON_STRUCTURED}
 DEFAULT_TIER = "deep"
 
 
@@ -62,7 +142,7 @@ def valid_tier(name: str, default: str = "deep") -> str:
     return name if name in MODEL_TIERS else default
 
 
-# Tier of the intake discovery call (when `local` is not auto-selected for it).
+# Tier of the intake discovery call (when no local tier is auto-selected for it).
 INTAKE_TIER = valid_tier(os.environ.get("PIPEZ_INTAKE_TIER", "deep"))
 
 # List prices, USD per million tokens (input, output), keyed by model id.
@@ -77,8 +157,9 @@ try:
         PRICES_PER_MTOK[_m] = (float(_p[0]), float(_p[1]))
 except (ValueError, TypeError, IndexError, AttributeError):
     logging.getLogger(__name__).warning("ignoring invalid PIPEZ_PRICES_JSON")
-if LOCAL_MODEL:
-    PRICES_PER_MTOK.setdefault(LOCAL_MODEL, (0.0, 0.0))
+for _lm in (LOCAL_MODEL, LOCAL_REASON_MODEL):
+    if _lm:
+        PRICES_PER_MTOK.setdefault(_lm, (0.0, 0.0))
 _WARNED_MODELS = set()
 
 
@@ -95,7 +176,7 @@ def estimate_cost(model, input_tokens, output_tokens) -> float:
 
 # Escalate a failed call to the next tier up (cheapest first).
 ESCALATE_ON_FAILURE = os.environ.get("PIPEZ_ESCALATE", "1") == "1"
-TIER_ORDER = ["local", "light", "standard", "deep"]
+TIER_ORDER = ["local", "local_reason", "light", "standard", "deep"]
 
 
 def next_tier_up(name: str):
@@ -154,6 +235,14 @@ PLAN_EFFORT = os.environ.get("PIPEZ_PLAN_EFFORT", "high")
 # Revision rounds (previous plan + human note) may run on a cheaper setting.
 PLAN_REVISION_TIER = valid_tier(os.environ.get("PIPEZ_PLAN_REVISION_TIER", "deep"))
 PLAN_REVISION_EFFORT = os.environ.get("PIPEZ_PLAN_REVISION_EFFORT") or PLAN_EFFORT
+# Mechanical plan gate (pipez/plangate.py): off | warn (violations become plan
+# warnings) | revise (errors are fed back to the planner, bounded rounds).
+# The gate never fails a run.
+PLAN_GATE_MODE = os.environ.get("PIPEZ_PLAN_GATE", "warn").strip().lower()
+if PLAN_GATE_MODE not in ("off", "warn", "revise"):
+    PLAN_GATE_MODE = "warn"
+PLAN_GATE_MAX_ROUNDS = int(os.environ.get("PIPEZ_PLAN_GATE_ROUNDS", "3"))
+PLAN_GATE_MIN_PROMPT_CHARS = int(os.environ.get("PIPEZ_PLAN_GATE_MIN_PROMPT_CHARS", "400"))
 
 # Coding leaves (task 07c): one Agent SDK session per code task in the sandbox.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")

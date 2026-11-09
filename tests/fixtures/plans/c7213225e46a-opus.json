@@ -1,0 +1,274 @@
+{
+ "architecture": "# pipez: architecture\n\n## Components\n- **config** (`src/config.js`): a pure function that turns `process.env` into a typed config object with PORT, DB_PATH, TRUST_PROXY and BASE_URL.\n- **codes** (`src/codes.js`): generates random 7-character base62 codes with `crypto.randomInt` and checks them against `^[0-9A-Za-z]{7}$`.\n- **db** (`src/db.js`): a wrapper around better-sqlite3. It opens one SQLite file, turns on WAL, creates the `links` table and exposes `insertLink`, `getUrl` and `close`.\n- **app** (`src/app.js`): `createApp(options)` is an Express app factory that never calls `listen`. It sets up the per-IP rate limiter for all routes, JSON body parsing, `GET /healthz` (200 JSON `{\"status\":\"ok\"}`), `POST /shorten`, `GET /:code`, a JSON 404 and a JSON error handler.\n- **server** (`src/server.js`): the entry point. It loads config, opens the DB, builds the app, listens on PORT and shuts down cleanly on SIGTERM/SIGINT. The Docker image and the VM deployment both run this same file with `node src/server.js`.\n- **tests** (`test/app.test.js`): node:test plus the built-in `fetch` against `app.listen(0)`, with an in-memory DB and no dev dependencies. It includes a dedicated `GET /healthz` test.\n- **docker** (`Dockerfile`, `.dockerignore`, `docker-compose.yml`): a generic Docker image that runs as a non-root user, declares `VOLUME /data` and exposes 3000.\n- **docs** (`README.md`, `LICENSE`, `.gitignore`): MIT license, run instructions for Docker and a plain VM, env vars, curl examples and warnings.\n\n## Data flow\n1. A client request arrives. Express works out `req.ip` from the `trust proxy` setting, which comes from TRUST_PROXY. The default is false, so the socket IP is used.\n2. The express-rate-limit middleware runs first on every route, including /healthz and 404s: 60 requests per 60 s per IP, in-memory store, standard headers. Request 61 gets a 429 JSON error with a Retry-After header.\n3. `GET /healthz` returns 200 `{\"status\":\"ok\"}` as JSON. It is registered before `/:code` so it is never shadowed. Container HEALTHCHECKs and the VM deploy health check both use it.\n4. `POST /shorten`: `express.json` parses the body and the URL is validated: it must be a string of at most 2048 characters, parse with `new URL`, and use the `http:` or `https:` protocol. The app then makes up to 5 attempts of `generateCode()` followed by `db.insertLink(code, url, Date.now())`. A false return (UNIQUE/PK collision) or a reserved code counts as a failed attempt. After 5 failures it returns 500. On success it returns 201 `{code, shortUrl, url}`.\n5. `GET /:code`: if `isValidCode` fails or `db.getUrl` finds nothing, the response is 404 JSON. Otherwise it is a 302 with `Location` set to the original URL.\n6. Logs go only to local stdout/stderr: one startup line plus error messages. Request bodies are never logged.\n\n## Key decisions and how each is honoured\n- **runtime.language: Node.js + Express.** express@4 on Node 22 LTS. The only dependencies are express, express-rate-limit and better-sqlite3.\n- **storage.database: single SQLite file.** better-sqlite3 opens DB_PATH (default `/data/shortener.db`) in WAL mode with the schema `links(code TEXT PRIMARY KEY, url TEXT NOT NULL, created_at INTEGER NOT NULL)`. No database server.\n- **security.rate_limit: 60 requests/min per IP, 429.** express-rate-limit v7 with `windowMs: 60000`, `limit: 60`, `standardHeaders: 'draft-7'`, `legacyHeaders: false` and a JSON handler. Every 429 carries Retry-After. Each `createApp` call builds its own limiter so test instances stay isolated.\n- **network.exposure: configurable.** TRUST_PROXY is parsed as follows: unset or 'false' gives false, 'true' gives true, digits give a hop count, and any other string (CIDR list, 'loopback') is passed through unchanged. The result goes to `app.set('trust proxy', ...)`. The README warns about the shared-IP and spoofing risks behind a proxy.\n- **data.retention: forever.** There is no delete or expiry code and no cleanup job. The README says the file grows without limit.\n- **hosting.target: generic Docker, plus a plain VM (added by the revision note).** The Dockerfile uses `node:22-bookworm-slim`. It is multi-stage only so that python3, make and g++ are available if better-sqlite3 has to compile from source; the runtime stage has no toolchain. The image runs as user `node` with `EXPOSE 3000`, `ENV PORT=3000`, `VOLUME /data` and a HEALTHCHECK on /healthz. docker-compose.yml mounts a named volume at /data and maps 3000:3000. One-command run: `docker build -t pipez . && docker run -p 3000:3000 -v pipez-data:/data pipez`. The VM path is described under VM deployment below. Neither path ties the project to a vendor.\n- **repo.hosting_ci: none.** No CI config files. Tests and image builds are run by hand.\n- **testing.level: basic.** node:test plus built-in fetch, with zero dev dependencies. Covers shorten success, a 7-character base62 code, redirect, 404 for unknown codes, 400 for invalid URLs, 429 on request 61, and GET /healthz returning 200 JSON.\n- **auth.method: none.** No auth, accounts, aliases, statistics or admin UI.\n- **legal.license: MIT.** A standard MIT LICENSE file with `Copyright (c) <current year> pipez contributors`, and `\"license\": \"MIT\"` in package.json.\n- **observability.telemetry: none.** No analytics, no error-reporting SDKs and no outbound calls at runtime. `x-powered-by` is disabled. The Dockerfile sets `NPM_CONFIG_UPDATE_NOTIFIER=false` and `NPM_CONFIG_FUND=false`. One caveat: at install time only (Docker build or VM `npm ci`), better-sqlite3 may download a prebuilt binary from GitHub. That is not runtime traffic, and the compile fallback covers offline installs.\n\n## VM deployment (revision note)\nThe target is a clean Ubuntu host, user `etl` with passwordless sudo, app tarball extracted to `/opt/pipez/`, and every command run from that directory:\n1. Install the prerequisites (`ca-certificates curl gnupg`) non-interactively.\n2. Add Node 22 with the NodeSource setup script (`curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -`), then run `sudo apt-get install -y nodejs`.\n3. Install `python3 make g++` so better-sqlite3 can compile from source if no prebuilt binary matches.\n4. Run `sudo chown -R etl:etl /opt/pipez`, then create `/data` owned by `etl` so the default DB_PATH works.\n5. Run `npm ci --omit=dev --no-audit --no-fund` in `/opt/pipez`.\n6. Start in the foreground with `node src/server.js`. It listens on 0.0.0.0:3000 and the health check is `GET /healthz`, which returns 200.\n\nEnv on the VM: PORT=3000 and DB_PATH=/data/shortener.db. TRUST_PROXY and BASE_URL are left empty for the operator to fill. Empty values mean false and derived-from-request respectively. There are no secrets.\n\n## Reserved codes\n`healthz` and `shorten` are both valid 7-character base62 strings. If the generator produces one, the app treats it as a collision and retries, so `/healthz` is never shadowed. `/healthz` is registered before `/:code`.\n\n## Error shape\nEvery error is JSON `{\"error\": \"<message>\"}`: 400 for invalid input or malformed JSON, 404 for unknown codes or routes, 413 for oversized bodies, 429 for rate limiting, and 500 for exhausted retries or unexpected errors.\n\n## OPTIONS (not planned, out of scope)\n- A persistent or shared rate-limit store (for example SQLite-backed) if multiple instances are run.\n- Rate-limit values configurable through env vars.\n- Deduplicating identical URLs.\n- A systemd unit for the VM. The deploy contract asks for a foreground process, so this is left to the operator.",
+ "stack": [
+  "Node.js 22 LTS (engines >=20)",
+  "Express 4 (express@^4.21.2)",
+  "express-rate-limit@^7 (in-memory store)",
+  "better-sqlite3@^11 (SQLite, WAL mode)",
+  "node:crypto (randomInt) for code generation",
+  "node:test + built-in fetch for tests (no dev dependencies)",
+  "Docker (node:22-bookworm-slim; multi-stage only for the native build fallback) + docker compose example",
+  "Plain Ubuntu VM deployment: NodeSource Node 22 + npm ci --omit=dev",
+  "MIT license"
+ ],
+ "repo_layout": "```\npipez/\n\u251c\u2500\u2500 package.json          # scaffold: license MIT, scripts start/test, deps\n\u251c\u2500\u2500 package-lock.json     # scaffold\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 config.js         # loadConfig(env), parseTrustProxy(v)\n\u2502   \u251c\u2500\u2500 codes.js          # ALPHABET, CODE_LENGTH, CODE_RE, generateCode(), isValidCode()\n\u2502   \u251c\u2500\u2500 db.js             # openDb(filePath) -> { insertLink, getUrl, close }\n\u2502   \u251c\u2500\u2500 app.js            # createApp(options) -> express app (no listen); includes GET /healthz\n\u2502   \u2514\u2500\u2500 server.js         # entry: config + db + app + listen + graceful shutdown\n\u251c\u2500\u2500 test/\n\u2502   \u2514\u2500\u2500 app.test.js       # node:test + fetch against app.listen(0)\n\u251c\u2500\u2500 Dockerfile\n\u251c\u2500\u2500 .dockerignore\n\u251c\u2500\u2500 docker-compose.yml\n\u251c\u2500\u2500 README.md\n\u251c\u2500\u2500 LICENSE               # MIT, pipez contributors\n\u2514\u2500\u2500 .gitignore\n```",
+ "modules": [
+  {
+   "name": "config",
+   "path": "src/config.js",
+   "purpose": "Parses environment variables into a config object, including how TRUST_PROXY values are interpreted.",
+   "depends_on": [],
+   "contract": "CommonJS. Exports `loadConfig(env = process.env)` and `parseTrustProxy(value)`.\n\n`loadConfig` returns `{ port: number, dbPath: string, trustProxy: boolean|number|string, baseUrl: string|null }`:\n- `port` = parseInt(env.PORT). Unset or empty gives 3000. Throw an Error unless the result is an integer in 1..65535.\n- `dbPath` = env.DB_PATH, or '/data/shortener.db' when unset or empty.\n- `trustProxy` = parseTrustProxy(env.TRUST_PROXY).\n- `baseUrl` = env.BASE_URL trimmed, with trailing slashes removed. Null when unset or empty.\n\n`parseTrustProxy` rules:\n- undefined, '' or 'false' (trimmed, case-insensitive) gives false.\n- 'true' gives true.\n- /^\\d+$/ gives a Number (hop count).\n- Any other string is returned trimmed and otherwise unchanged, for example 'loopback' or '10.0.0.0/8, 172.16.0.0/12'.\n\nPure: no side effects and no logging. Owns `src/config.js` only. Verified with `node -e` checks."
+  },
+  {
+   "name": "codes",
+   "path": "src/codes.js",
+   "purpose": "Generates and validates random 7-character base62 short codes.",
+   "depends_on": [],
+   "contract": "CommonJS. Exports:\n- `ALPHABET` = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' (62 characters).\n- `CODE_LENGTH` = 7.\n- `CODE_RE` = /^[0-9A-Za-z]{7}$/.\n- `generateCode()`: returns a 7-character string where each character is ALPHABET[crypto.randomInt(62)].\n- `isValidCode(value)`: returns true only when typeof value === 'string' and CODE_RE matches.\n\nNo state and no I/O. Owns `src/codes.js` only. Covered by test/app.test.js."
+  },
+  {
+   "name": "db",
+   "path": "src/db.js",
+   "purpose": "SQLite persistence for links via better-sqlite3: schema creation, WAL, insert and lookup.",
+   "depends_on": [],
+   "contract": "CommonJS. Exports `openDb(filePath)`, which returns `{ insertLink(code, url, createdAt): boolean, getUrl(code): string|null, close(): void }`.\n\n`openDb`:\n- When filePath !== ':memory:', runs fs.mkdirSync(dirname, { recursive: true }).\n- Opens `new Database(filePath)` and runs `db.pragma('journal_mode = WAL')`.\n- Runs `CREATE TABLE IF NOT EXISTS links (code TEXT PRIMARY KEY, url TEXT NOT NULL, created_at INTEGER NOT NULL)`.\n- Prepares the statements once.\n\n`insertLink` returns true on success. It returns false when the error has err.code 'SQLITE_CONSTRAINT_PRIMARYKEY' or 'SQLITE_CONSTRAINT_UNIQUE', and rethrows any other error. `getUrl` returns the url or null. `close` closes the handle.\n\nNo delete or update functions. Synchronous. Owns `src/db.js` only. Tests use ':memory:' through createApp."
+  },
+  {
+   "name": "app",
+   "path": "src/app.js",
+   "purpose": "Express app factory with rate limiting, the healthz, shorten and redirect routes, validation and JSON errors. No listen call.",
+   "depends_on": [
+    "codes",
+    "db"
+   ],
+   "contract": "CommonJS. Exports `createApp(options)`.\n\nOptions:\n- `db` (required; the object returned by openDb)\n- `trustProxy` (default false)\n- `baseUrl` (string|null, default null)\n- `rateLimit` (default { windowMs: 60000, limit: 60 })\n- `generateCode` (default codes.generateCode)\n- `logger` (default console; only `.error` is used)\n\nReturns an express app and never calls listen.\n\nOrder:\n1. `app.disable('x-powered-by')`, then `app.set('trust proxy', trustProxy)`.\n2. A new express-rate-limit instance for each createApp call: { windowMs, limit, standardHeaders: 'draft-7', legacyHeaders: false, handler: 429 { error: 'Too many requests, please try again later.' } }. It applies to ALL routes and always sends Retry-After on 429.\n3. `express.json({ limit: '10kb' })`.\n4. `GET /healthz` returns 200 with JSON { status: 'ok' } (Content-Type application/json). It is registered before `/:code` and is rate limited like every other route.\n5. `POST /shorten` takes { url }. The url must be a string of 1..2048 characters that parses with new URL() and has protocol 'http:' or 'https:'; otherwise return 400 { error }. Then make up to 5 attempts: a code in RESERVED = ['healthz','shorten'] counts as a failed attempt; otherwise db.insertLink(code, url, Date.now()) returning true means success. After 5 failures return 500 { error: 'Could not allocate a unique code' }. On success return 201 { code, shortUrl: (baseUrl || `${req.protocol}://${req.get('host')}`) + '/' + code, url }.\n6. `GET /:code` returns 404 { error: 'Not found' } when the code is invalid or unknown, and res.redirect(302, url) otherwise.\n7. A catch-all 404 { error: 'Not found' }.\n8. An error handler: 'entity.parse.failed' gives 400 { error: 'Invalid JSON body' }; 'entity.too.large' gives 413 { error: 'Payload too large' }; anything else calls logger.error(err.message) and returns 500 { error: 'Internal server error' }.\n\nNever logs request bodies. Owns `src/app.js` only. Tested by test/app.test.js."
+  },
+  {
+   "name": "server",
+   "path": "src/server.js",
+   "purpose": "Process entry point for both Docker and the VM: wires config, db and app together, listens and shuts down cleanly.",
+   "depends_on": [
+    "config",
+    "db",
+    "app"
+   ],
+   "contract": "CommonJS. Run by `npm start`, by Docker `CMD node src/server.js`, and by the VM start_command `node src/server.js` from /opt/pipez.\n\nExports `start(env = process.env)`, which returns `{ server, db }`. It calls loadConfig, then openDb(cfg.dbPath), then createApp({ db, trustProxy, baseUrl }), then `app.listen(cfg.port, '0.0.0.0')`, and logs `pipez listening on port <port>` to stdout.\n\nWhen `require.main === module`, it calls start() and installs SIGTERM and SIGINT handlers: server.close(), then db.close() and process.exit(0), with a forced exit after 5 s. If startup throws, it logs the message to stderr and exits 1.\n\nRuns in the foreground and never daemonizes. Makes no outbound calls. Owns `src/server.js` only. Verified by a manual smoke test: start it and curl /healthz."
+  },
+  {
+   "name": "tests",
+   "path": "test/app.test.js",
+   "purpose": "Basic automated tests of core behaviour, including GET /healthz, using node:test and built-in fetch.",
+   "depends_on": [
+    "app",
+    "db",
+    "codes"
+   ],
+   "contract": "Run with `npm test`, which runs `node --test` and discovers test/*.test.js. No dev dependencies: only node:test, node:assert/strict and global fetch.\n\nHelper `startApp(opts)`: openDb(':memory:'), then createApp({ db, ...opts }), then app.listen(0, '127.0.0.1'). It resolves to { base, close() }. Every test gets a fresh app.\n\nRequired cases:\n1. POST /shorten returns 201 with code, url equal to the input, and shortUrl === base + '/' + code.\n2. code matches /^[0-9A-Za-z]{7}$/.\n3. GET /<code> with redirect:'manual' returns 302 with Location equal to the original URL.\n4. GET /zzzzzzz (unknown) and GET /bad (malformed) both return 404 JSON with an error field.\n5. Invalid URLs return 400 JSON with an error field: 'not a url', 'ftp://x.com', a missing url, and a URL longer than 2048 characters.\n6. 60 requests to GET /healthz return 200; the 61st returns 429 with a Retry-After header and a JSON error.\n7. GET /healthz returns 200, content-type contains application/json, and the body deep-equals { status: 'ok' }.\n\nOptional: baseUrl is honoured. Owns `test/` only."
+  },
+  {
+   "name": "docker",
+   "path": "Dockerfile",
+   "purpose": "Generic Docker packaging: image build, ignore file and compose example.",
+   "depends_on": [
+    "server"
+   ],
+   "contract": "Owns `Dockerfile`, `.dockerignore` and `docker-compose.yml`.\n\n**Dockerfile**\n- Stage `deps`: node:22-bookworm-slim with apt python3, make and g++. Then COPY package.json and package-lock.json and run `npm ci --omit=dev --no-audit --no-fund`.\n- Runtime stage: node:22-bookworm-slim with ENV NODE_ENV=production, PORT=3000, DB_PATH=/data/shortener.db, NPM_CONFIG_UPDATE_NOTIFIER=false and NPM_CONFIG_FUND=false. Copy node_modules, package.json and src/. Run `mkdir -p /data && chown node:node /data`. Then USER node, VOLUME /data, EXPOSE 3000, a HEALTHCHECK that uses node fetch against /healthz, and CMD [\"node\",\"src/server.js\"].\n\n**.dockerignore** excludes node_modules, .git, test, *.db*, data, npm-debug.log and .env.\n\n**docker-compose.yml** defines service `pipez` with build ., image pipez, ports '3000:3000', volumes 'pipez-data:/data', commented-out TRUST_PROXY and BASE_URL entries, and restart: unless-stopped. It declares the top-level volume `pipez-data:`.\n\nTested by hand with the one-command run and a curl to /healthz."
+  },
+  {
+   "name": "docs",
+   "path": "README.md",
+   "purpose": "README (Docker and VM run instructions), the MIT LICENSE and .gitignore.",
+   "depends_on": [],
+   "contract": "Owns `README.md`, `LICENSE` and `.gitignore`.\n\n**LICENSE**: the verbatim MIT text with `Copyright (c) <current year> pipez contributors`.\n\n**.gitignore**: node_modules/, *.db, *.db-wal, *.db-shm, data/, .env and npm-debug.log*.\n\n**README.md** sections:\n- Overview.\n- One-command Docker run: `docker build -t pipez . && docker run -p 3000:3000 -v pipez-data:/data pipez`.\n- docker compose.\n- Plain VM / Ubuntu deployment: install Node 22 via NodeSource, `npm ci --omit=dev`, create /data writable by the service user (or set DB_PATH), and run `node src/server.js` in the foreground. Health check is GET /healthz.\n- Local development.\n- API: POST /shorten, GET /:code and GET /healthz, with status codes 201/302/400/404/413/429/500.\n- curl examples.\n- Env var table: PORT, DB_PATH, TRUST_PROXY, BASE_URL.\n- Rate limiting.\n- A prominent reverse-proxy warning for TRUST_PROXY covering the shared-IP and spoofing risks.\n- Data retention: links are kept forever and the file grows without limit.\n- Privacy: no telemetry.\n- License: MIT."
+  }
+ ],
+ "tasks": [
+  {
+   "id": "T1",
+   "title": "Implement config module",
+   "module": "config",
+   "prompt": "Create src/config.js (CommonJS) for the pipez URL shortener (Node.js 22, Express 4).\n\nExport `parseTrustProxy(value)` with these rules:\n- undefined, '' or 'false' (trimmed, case-insensitive) returns false.\n- 'true' returns true.\n- A string matching /^\\d+$/ returns a Number (hop count).\n- Any other string is returned trimmed, for example 'loopback' or '10.0.0.0/8,172.16.0.0/12'. The result is later passed to app.set('trust proxy', ...).\n\nExport `loadConfig(env = process.env)`, returning { port, dbPath, trustProxy, baseUrl }:\n- port = parseInt(env.PORT, 10). Use 3000 when PORT is unset or empty. Throw an Error with a clear message unless the value is an integer in 1..65535.\n- dbPath = env.DB_PATH || '/data/shortener.db'.\n- trustProxy = parseTrustProxy(env.TRUST_PROXY).\n- baseUrl = env.BASE_URL trimmed with trailing '/' removed, or null when unset or empty.\n\nOperators may set any of these variables to an empty string; each must then fall back to its default.\n\nNo side effects, no logging, and no dependencies beyond Node core.",
+   "tier": "standard",
+   "effort": "low",
+   "depends_on": [],
+   "acceptance": [
+    "node -e \"const c=require('./src/config');console.log(JSON.stringify(c.loadConfig({})))\" prints {\"port\":3000,\"dbPath\":\"/data/shortener.db\",\"trustProxy\":false,\"baseUrl\":null}",
+    "loadConfig({PORT:'',DB_PATH:'',TRUST_PROXY:'',BASE_URL:''}) returns the same defaults",
+    "parseTrustProxy('true')===true, parseTrustProxy('FALSE')===false, parseTrustProxy('2')===2, parseTrustProxy(' loopback ')==='loopback'",
+    "loadConfig({BASE_URL:'https://s.example/'}).baseUrl==='https://s.example'",
+    "loadConfig({PORT:'abc'}) and loadConfig({PORT:'70000'}) both throw"
+   ]
+  },
+  {
+   "id": "T2",
+   "title": "Implement base62 short code module",
+   "module": "codes",
+   "prompt": "Create src/codes.js (CommonJS) for pipez.\n\nExport:\n- ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'\n- CODE_LENGTH = 7\n- CODE_RE = /^[0-9A-Za-z]{7}$/\n- generateCode(): build a 7-character string where each character is ALPHABET[crypto.randomInt(ALPHABET.length)], using require('node:crypto'). Codes must be random, never sequential or time-based.\n- isValidCode(value): return true only when typeof value === 'string' && CODE_RE.test(value).\n\nNo state, no I/O, no other dependencies.",
+   "tier": "standard",
+   "effort": "low",
+   "depends_on": [],
+   "acceptance": [
+    "10000 calls to generateCode() all match /^[0-9A-Za-z]{7}$/",
+    "generateCode uses crypto.randomInt (or crypto.randomBytes) and keeps no counter or state",
+    "isValidCode('abc1234')===true; isValidCode('abc123')===false; isValidCode('abc-123')===false; isValidCode(1234567)===false",
+    "ALPHABET.length===62"
+   ]
+  },
+  {
+   "id": "T3",
+   "title": "Implement SQLite storage module",
+   "module": "db",
+   "prompt": "Create src/db.js (CommonJS) for pipez using better-sqlite3, which is already installed.\n\nExport `openDb(filePath)`:\n- If filePath !== ':memory:', run fs.mkdirSync(path.dirname(filePath), { recursive: true }).\n- `const db = new Database(filePath)`, then `db.pragma('journal_mode = WAL')`.\n- Execute `CREATE TABLE IF NOT EXISTS links (code TEXT PRIMARY KEY, url TEXT NOT NULL, created_at INTEGER NOT NULL)`.\n- Prepare the INSERT and SELECT statements once.\n\nReturn an object with:\n- insertLink(code, url, createdAt): run the insert and return true. If the error's err.code is 'SQLITE_CONSTRAINT_PRIMARYKEY' or 'SQLITE_CONSTRAINT_UNIQUE', return false. Rethrow any other error.\n- getUrl(code): return the url string, or null if the code is not found.\n- close(): close the handle.\n\nLinks are kept forever, so do not add delete, update or expiry functions. Log nothing.",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "openDb(':memory:') works; insertLink('abcdefg','https://a.com',Date.now()) returns true; getUrl('abcdefg')==='https://a.com'",
+    "A second insertLink with the same code returns false and does not throw",
+    "getUrl('zzzzzzz') returns null",
+    "openDb('/tmp/pipez-x/sub/test.db') creates the directory, and PRAGMA journal_mode then returns 'wal'",
+    "The schema matches links(code TEXT PRIMARY KEY, url TEXT NOT NULL, created_at INTEGER NOT NULL)",
+    "The module exports no delete or update functionality"
+   ]
+  },
+  {
+   "id": "T4",
+   "title": "Implement Express app factory with rate limiting, healthz and routes",
+   "module": "app",
+   "prompt": "Create src/app.js (CommonJS) exporting `createApp(options)` for pipez. It must NOT call listen.\n\nOptions:\n- db (required): exposes insertLink(code, url, createdAt) returning a boolean, getUrl(code) returning a string or null, and close(). See src/db.js.\n- trustProxy (default false).\n- baseUrl (string|null, default null; trailing slashes already stripped).\n- rateLimit (default { windowMs: 60000, limit: 60 }).\n- generateCode (default require('./codes').generateCode).\n- logger (default console).\n\nUse require('./codes').isValidCode.\n\nBuild the app in this order:\n1. app.disable('x-powered-by'); app.set('trust proxy', trustProxy).\n2. Create a NEW limiter on every createApp call: require('express-rate-limit').rateLimit({ windowMs, limit, standardHeaders: 'draft-7', legacyHeaders: false, handler: (req, res, next, opts) => res.status(429).json({ error: 'Too many requests, please try again later.' }) }). Register it with app.use(limiter) before everything else so every route is limited, including /healthz and 404s. Check that express-rate-limit v7 sets Retry-After on 429 with these options; if it does not, set the header in the handler as Math.ceil(windowMs/1000) or derive it from req.rateLimit.resetTime.\n3. app.use(express.json({ limit: '10kb' })).\n4. GET /healthz returns res.status(200).json({ status: 'ok' }). Register it BEFORE /:code. The Docker HEALTHCHECK and the VM deploy health check (health_path /healthz) both rely on this route.\n5. POST /shorten:\n   - url = req.body && req.body.url.\n   - Return 400 {error} unless url is a string of length 1..2048 that parses with new URL(url) and has protocol 'http:' or 'https:'.\n   - Loop for up to 5 attempts: code = generateCode(). If code is in RESERVED = ['healthz','shorten'], continue to the next attempt. If db.insertLink(code, url, Date.now()) returns true, break.\n   - After 5 failed attempts, return 500 {error:'Could not allocate a unique code'}.\n   - On success: base = baseUrl || `${req.protocol}://${req.get('host')}`; res.status(201).json({ code, shortUrl: `${base}/${code}`, url }).\n   - Store and return the original string exactly. No deduplication.\n6. GET /:code returns 404 {error:'Not found'} if !isValidCode(req.params.code) or db.getUrl returns null. Otherwise res.redirect(302, url).\n7. A catch-all app.use that returns 404 {error:'Not found'}.\n8. An error handler (err, req, res, next):\n   - err.type === 'entity.parse.failed' returns 400 {error:'Invalid JSON body'}.\n   - err.type === 'entity.too.large' returns 413 {error:'Payload too large'}.\n   - Anything else: logger.error(err.message), then 500 {error:'Internal server error'}.\n\nNever log request bodies and make no outbound network calls. Use only express, express-rate-limit and Node core.",
+   "tier": "deep",
+   "depends_on": [],
+   "acceptance": [
+    "src/app.js exports createApp and contains no listen call",
+    "GET /healthz returns 200 with Content-Type application/json and body {\"status\":\"ok\"}, and is not captured by /:code",
+    "POST /shorten with {\"url\":\"https://example.com\"} returns 201 with code (7 base62 characters), shortUrl = <protocol>://<host>/<code> (or baseUrl/<code> when set), and the original url",
+    "POST /shorten returns 400 with JSON {error} for 'ftp://x', 'not a url', a missing url, a non-string url, a URL over 2048 characters, and malformed JSON",
+    "GET /<known code> returns 302 with Location equal to the original URL; an unknown or malformed code returns 404 JSON",
+    "From one IP, the 61st request within the window on any route, including /healthz, returns 429 with a Retry-After header and JSON {error}",
+    "Each createApp call has its own limiter state (two apps do not share counters)",
+    "A generateCode stub that always returns the same existing code yields 500 after exactly 5 attempts; a stub returning 'healthz' is never stored",
+    "No X-Powered-By header is sent"
+   ]
+  },
+  {
+   "id": "T5",
+   "title": "Implement server entry point",
+   "module": "server",
+   "prompt": "Create src/server.js (CommonJS) for pipez. It is the single entry point for npm start, the Docker CMD, and the VM start_command `node src/server.js`, which runs in the foreground from /opt/pipez.\n\nExport `start(env = process.env)`:\n- cfg = require('./config').loadConfig(env)\n- db = require('./db').openDb(cfg.dbPath)\n- app = require('./app').createApp({ db, trustProxy: cfg.trustProxy, baseUrl: cfg.baseUrl })\n- server = app.listen(cfg.port, '0.0.0.0', () => console.log(`pipez listening on port ${cfg.port}`))\n- return { server, db }\n\nWhen require.main === module:\n- Wrap start() in try/catch. On error, console.error(err.message) and process.exit(1).\n- Register SIGTERM and SIGINT handlers that call server.close(() => { db.close(); process.exit(0); }), plus a setTimeout(...).unref() that forces exit after 5000 ms.\n\nDo not daemonize or fork. Make no outbound network calls and do no other logging. package.json already has scripts.start = 'node src/server.js' and main = 'src/server.js'. Do not change dependencies.",
+   "tier": "standard",
+   "effort": "low",
+   "depends_on": [],
+   "acceptance": [
+    "PORT=3123 DB_PATH=/tmp/pipez-smoke/s.db node src/server.js logs 'pipez listening on port 3123', and curl -s localhost:3123/healthz returns {\"status\":\"ok\"} (requires T1-T4)",
+    "The process stays in the foreground and exits with code 0 within 5 s of receiving SIGTERM",
+    "PORT=abc node src/server.js exits with code 1 and prints an error message on stderr",
+    "require('./src/server').start is a function, and requiring the module does not start listening"
+   ]
+  },
+  {
+   "id": "T6",
+   "title": "Write node:test suite for core behaviour including /healthz",
+   "module": "tests",
+   "prompt": "Create test/app.test.js for pipez using only node:test, node:assert/strict and global fetch (Node 22). Do not add dev dependencies. `npm test` runs `node --test`.\n\nWrite a helper `async function startApp(opts = {})`:\n- db = openDb(':memory:') from ../src/db.\n- app = createApp({ db, ...opts }) from ../src/app.\n- server = app.listen(0, '127.0.0.1'); await the 'listening' event.\n- Return { base: `http://127.0.0.1:${server.address().port}`, close: () => new Promise(r => server.close(() => { db.close(); r(); })) }.\n\nEvery test gets a fresh app and closes it in a finally block.\n\nTests:\n1. Shorten success: POST /shorten with JSON {url:'https://example.com/a?b=1'} returns 201; body.url equals the input; body.shortUrl === base + '/' + body.code.\n2. The code matches /^[0-9A-Za-z]{7}$/. Shorten twice and assert the two codes differ.\n3. Redirect: GET base/<code> with { redirect: 'manual' } returns 302, and the location header equals the original URL.\n4. Unknown code: GET /zzzzzzz returns 404 with a JSON error. GET /abc returns 404.\n5. Invalid URL returns 400 with a JSON error field for each of: {url:'not a url'}, {url:'ftp://example.com'}, {}, and {url:'https://e.com/' + 'a'.repeat(2100)}.\n6. Rate limit: 60 sequential GET /healthz requests all return 200. The 61st returns 429, has a retry-after header, and has a JSON body with an error field.\n7. Health check: GET /healthz on a fresh app returns 200, the content-type header contains 'application/json', and the parsed body deep-equals { status: 'ok' }.\n\nOptionally, test that baseUrl:'https://s.example' produces shortUrl 'https://s.example/<code>'.",
+   "tier": "standard",
+   "depends_on": [
+    "T2",
+    "T3",
+    "T4"
+   ],
+   "acceptance": [
+    "npm test exits 0 with all tests passing",
+    "The suite covers shorten success, 7-character base62 code, 302 redirect, 404 for unknown code, 400 for invalid URL and 429 on request 61",
+    "A dedicated test asserts that GET /healthz returns 200 with a JSON content-type and body {status:'ok'}",
+    "No devDependencies are added to package.json",
+    "Tests use ':memory:' databases and leave no files behind"
+   ]
+  },
+  {
+   "id": "T7",
+   "title": "Dockerfile, .dockerignore and docker-compose.yml",
+   "module": "docker",
+   "prompt": "Create Dockerfile, .dockerignore and docker-compose.yml at the repo root for pipez (Node 22, better-sqlite3 native module, entry src/server.js). Generic Docker only: no vendor-specific config and no CI.\n\nDockerfile:\n- Stage 1 `deps`:\n  - FROM node:22-bookworm-slim AS deps.\n  - RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/* (this toolchain is only for better-sqlite3's compile fallback).\n  - WORKDIR /app; COPY package.json package-lock.json ./; RUN npm ci --omit=dev --no-audit --no-fund.\n- Stage 2:\n  - FROM node:22-bookworm-slim; WORKDIR /app.\n  - ENV NODE_ENV=production PORT=3000 DB_PATH=/data/shortener.db NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false.\n  - COPY --from=deps /app/node_modules ./node_modules; COPY package.json ./; COPY src ./src.\n  - RUN mkdir -p /data && chown node:node /data.\n  - USER node; VOLUME /data; EXPOSE 3000.\n  - HEALTHCHECK --interval=30s --timeout=3s CMD node -e \"fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"\n  - CMD [\"node\",\"src/server.js\"].\n\n.dockerignore: node_modules, .git, test, *.db, *.db-wal, *.db-shm, data, npm-debug.log, .env, Dockerfile, docker-compose.yml.\n\ndocker-compose.yml:\n- Service `pipez`: build: ., image: pipez, ports ['3000:3000'], volumes ['pipez-data:/data'], restart: unless-stopped.\n- An environment block containing commented examples for TRUST_PROXY and BASE_URL.\n- Top-level `volumes: { pipez-data: {} }`.",
+   "tier": "standard",
+   "depends_on": [
+    "T1",
+    "T2",
+    "T3",
+    "T4",
+    "T5"
+   ],
+   "acceptance": [
+    "docker build -t pipez . succeeds",
+    "docker run -p 3000:3000 -v pipez-data:/data pipez starts, and curl -s localhost:3000/healthz returns {\"status\":\"ok\"}",
+    "Inside the container, `id -u` is not 0 (runs as user node)",
+    "The Dockerfile contains EXPOSE 3000, ENV PORT=3000 and VOLUME /data, and the runtime stage has no compiler toolchain",
+    "After a POST /shorten, restarting the container with the same volume keeps the link resolvable",
+    "docker compose config validates; the compose file maps 3000:3000 and mounts the named volume pipez-data at /data",
+    "No CI files or vendor-specific deployment files are added"
+   ]
+  },
+  {
+   "id": "T8",
+   "title": "README (Docker + VM), MIT LICENSE and .gitignore",
+   "module": "docs",
+   "prompt": "Create README.md, LICENSE and .gitignore at the repo root for pipez, a small URL shortener API (Node.js + Express, SQLite via better-sqlite3, Docker or a plain VM).\n\nLICENSE: the standard MIT License text, verbatim, with the line `Copyright (c) <current year> pipez contributors`.\n\n.gitignore: node_modules/, *.db, *.db-wal, *.db-shm, data/, .env, npm-debug.log*.\n\nREADME.md sections:\n1. Overview: no auth or accounts; links are stored in a single SQLite file.\n2. Quick start (one command): `docker build -t pipez . && docker run -p 3000:3000 -v pipez-data:/data pipez`.\n3. docker compose: `docker compose up --build`.\n4. Plain VM (Ubuntu) deployment, run from the app directory (e.g. /opt/pipez):\n   - `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -`, then `sudo apt-get install -y nodejs`.\n   - Optionally `sudo apt-get install -y python3 make g++` in case better-sqlite3 must compile.\n   - `npm ci --omit=dev`.\n   - Make /data writable by the service user (`sudo mkdir -p /data && sudo chown $USER /data`), or set DB_PATH.\n   - Start in the foreground with `node src/server.js`. It listens on port 3000; the health check is `curl localhost:3000/healthz`.\n5. Local development: `npm install`; `DB_PATH=./data/shortener.db npm start`; `npm test` (node:test, run by hand, no CI).\n6. API:\n   - POST /shorten: body {\"url\":\"https://...\"}, http/https only, max 2048 characters. Returns 201 {code, shortUrl, url}. Errors: 400. Every POST creates a new code.\n   - GET /:code: 302 redirect, or 404. Codes are 7 random base62 characters.\n   - GET /healthz: 200 {\"status\":\"ok\"}.\n   - All errors are JSON {\"error\": \"...\"}.\n7. curl examples:\n   - Shorten: curl -X POST localhost:3000/shorten -H 'Content-Type: application/json' -d '{\"url\":\"https://example.com\"}'\n   - Follow: curl -i localhost:3000/<code>\n   - Health: curl localhost:3000/healthz\n8. Configuration table:\n   - PORT: default 3000.\n   - DB_PATH: default /data/shortener.db.\n   - TRUST_PROXY: default false. Accepts true, false, a hop count such as 1, or a comma-separated CIDR/subnet list or names such as loopback. Passed to Express 'trust proxy'.\n   - BASE_URL: default unset, meaning it is derived from the request protocol and host. Used to build shortUrl.\n   - Empty values fall back to the defaults.\n9. Rate limiting: 60 requests per minute per client IP across all routes, including /healthz. Exceeding it returns 429 with Retry-After and RateLimit headers. The counter is in-memory, per instance, and resets on restart.\n10. A prominent **Warning: reverse proxies / load balancers** section:\n    - With the default TRUST_PROXY=false behind a proxy, all clients share the proxy's IP and therefore one limit.\n    - Setting it too permissively (e.g. true when clients can reach the app directly) lets clients spoof X-Forwarded-For and bypass the limit.\n    - Set it to the exact hop count or proxy subnet.\n11. Data retention: links are kept forever, with no expiry, deletion or cleanup. The SQLite file grows without limit. Back up /data.\n12. Privacy: no telemetry, analytics or third-party calls. Logs go only to stdout/stderr, and request bodies are never logged.\n13. License: MIT, see LICENSE.\n\nDo not document features that do not exist: auth, custom aliases, stats or an admin UI.",
+   "tier": "standard",
+   "effort": "low",
+   "depends_on": [],
+   "acceptance": [
+    "LICENSE is the standard MIT text with 'Copyright (c) <current year> pipez contributors'",
+    "README contains the exact command `docker build -t pipez . && docker run -p 3000:3000 -v pipez-data:/data pipez`",
+    "README has a VM section covering NodeSource Node 22, npm ci --omit=dev, /data permissions, `node src/server.js` and the /healthz check",
+    "README documents PORT, DB_PATH, TRUST_PROXY and BASE_URL with defaults, and gives curl examples for POST /shorten, GET /:code and GET /healthz",
+    "README includes an explicit TRUST_PROXY reverse-proxy warning covering both the shared-IP and spoofing risks",
+    "README states that links are kept forever and the SQLite file grows without limit",
+    "README states there is no telemetry and no third-party calls",
+    ".gitignore excludes node_modules and the SQLite db/wal/shm files"
+   ]
+  }
+ ],
+ "scaffold_commands": [
+  "git init",
+  "npm init -y",
+  "npm pkg set name=pipez version=0.1.0 description=\"Small URL shortener API\" license=MIT main=src/server.js scripts.start=\"node src/server.js\" scripts.test=\"node --test\" engines.node=\">=20\"",
+  "npm pkg set private=true --json",
+  "npm install express@^4.21.2 express-rate-limit@^7.4.0 better-sqlite3@^11.7.0 --no-audit --no-fund",
+  "mkdir -p src test"
+ ],
+ "build_command": "npm ci --no-audit --no-fund",
+ "test_command": "npm test",
+ "deploy": {
+  "target": "vm",
+  "install_commands": [
+   "sudo DEBIAN_FRONTEND=noninteractive apt-get update -y",
+   "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg",
+   "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -",
+   "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs",
+   "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3 make g++",
+   "sudo chown -R etl:etl /opt/pipez",
+   "sudo mkdir -p /data && sudo chown etl:etl /data",
+   "npm ci --omit=dev --no-audit --no-fund"
+  ],
+  "start_command": "node src/server.js",
+  "port": 3000,
+  "health_path": "/healthz",
+  "env": [
+   {
+    "name": "PORT",
+    "value": "3000"
+   },
+   {
+    "name": "DB_PATH",
+    "value": "/data/shortener.db"
+   },
+   {
+    "name": "TRUST_PROXY",
+    "value": ""
+   },
+   {
+    "name": "BASE_URL",
+    "value": ""
+   }
+  ]
+ }
+}

@@ -1,0 +1,200 @@
+{
+ "architecture": "The service is a small Express API that exports an app factory. On startup it creates a SQLite database (better-sqlite3) in the path from DB_PATH (default /data/shortener.db) and ensures the schema with a UNIQUE code column. A rate\u2011limiting middleware (express-rate-limit) limits every client IP (respecting TRUST_PROXY) to 60 requests per minute across all routes. The API has three routes: POST /shorten validates JSON input, generates a random 7\u2011char base62 code (retrying up to 5 times on collision), stores the mapping, and returns JSON with the code and short URL; GET /:code validates the code pattern, looks up the URL and issues a 302 redirect or a 404 JSON error; GET /healthz returns 200 JSON. The app is built into a Docker image (node:lts\u2011alpine) that runs as a non\u2011root user, exposes port 3000, declares a /data volume, and reads env vars PORT, DB_PATH, TRUST_PROXY, BASE_URL. No telemetry, no external calls, only local stdout logging. The repository layout follows the brief (src, test, Dockerfile, etc.).",
+ "stack": [
+  "node",
+  "express",
+  "better-sqlite3",
+  "express-rate-limit"
+ ],
+ "repo_layout": "project-root/\n\u251c\u2500 src/\n\u2502  \u251c\u2500 app.js            # creates Express app, wires middleware & routes\n\u2502  \u251c\u2500 routes.js         # route definitions and handlers\n\u2502  \u251c\u2500 db.js             # SQLite connection & schema init\n\u2502  \u251c\u2500 rateLimiter.js    # rate\u2011limit middleware factory\n\u2502  \u2514\u2500 server.js         # entry point that calls app.listen()\n\u251c\u2500 test/\n\u2502  \u2514\u2500 api.test.js       # integration tests using node:test & supertest\n\u251c\u2500 Dockerfile\n\u251c\u2500 .dockerignore\n\u251c\u2500 docker-compose.yml\n\u251c\u2500 package.json\n\u251c\u2500 README.md\n\u251c\u2500 LICENSE\n\u2514\u2500 .gitignore",
+ "modules": [
+  {
+   "name": "db",
+   "path": "src/db.js",
+   "purpose": "Initialize and expose a better\u2011sqlite3 Database instance, create schema, enforce WAL mode, and provide a simple query interface.",
+   "depends_on": [],
+   "contract": "Exports a function `initDb(dbPath: string): Database` that returns an opened Database with the schema ensured. Throws on unrecoverable errors. The Database object must have methods `prepare`, `run`, `get`, `all` as per better\u2011sqlite3. No side effects beyond file creation."
+  },
+  {
+   "name": "rateLimiter",
+   "path": "src/rateLimiter.js",
+   "purpose": "Create an Express middleware that limits each client IP to 60 requests per minute, returns 429 with JSON error and Retry\u2011After header.",
+   "depends_on": [],
+   "contract": "Exports a function `createLimiter(): RequestHandler` that can be used with `app.use`. The handler respects the `TRUST_PROXY` env var when determining client IP. On limit breach it sends status 429 with body `{error:\"rate limit exceeded\"}` and appropriate `Retry-After` header."
+  },
+  {
+   "name": "routes",
+   "path": "src/routes.js",
+   "purpose": "Define the three API endpoints (POST /shorten, GET /:code, GET /healthz) and their handlers.",
+   "depends_on": [
+    "db",
+    "rateLimiter"
+   ],
+   "contract": "Exports a function `register(app: Express): void` that attaches the routes to the given Express app. Handlers must validate input, generate 7\u2011char base62 codes using crypto, store/retrieve via the db module, and return JSON or redirects as specified. Errors are sent as JSON with appropriate HTTP status."
+  },
+  {
+   "name": "app",
+   "path": "src/app.js",
+   "purpose": "Factory that creates an Express application, applies middleware, and registers routes.",
+   "depends_on": [
+    "db",
+    "rateLimiter",
+    "routes"
+   ],
+   "contract": "Exports a function `createApp(config: {dbPath?:string, trustProxy?:string}): Express`. The function sets `trust proxy` based on config, installs JSON body parser, the rate\u2011limiter, and calls `register` from routes. Returns the ready Express instance without calling `listen`."
+  },
+  {
+   "name": "server",
+   "path": "src/server.js",
+   "purpose": "Entry point for the Docker container; reads env vars, creates the app, and starts listening.",
+   "depends_on": [
+    "app"
+   ],
+   "contract": "When executed (`node src/server.js`) it reads PORT (default 3000), DB_PATH, TRUST_PROXY, creates the app via `createApp`, and calls `app.listen(PORT)`. Logs a one\u2011line startup message to stdout."
+  },
+  {
+   "name": "apiTests",
+   "path": "test/api.test.js",
+   "purpose": "Integration test suite covering core behaviour using node:test and supertest.",
+   "depends_on": [
+    "app",
+    "db"
+   ],
+   "contract": "Exports no symbols; the file is executed by `npm test`. It starts the app with an in\u2011memory SQLite DB (`:memory:`), runs tests for: successful shorten (code length 7, base62), redirect works, unknown code 404, invalid URL 400, rate\u2011limit 429 on 61st request within a minute, and healthz 200. All tests must pass."
+  }
+ ],
+ "tasks": [
+  {
+   "id": "T1",
+   "title": "Implement DB module",
+   "module": "db",
+   "prompt": "Create src/db.js implementing initDb(dbPath) that opens a better\u2011sqlite3 database, sets WAL mode, creates the links table with UNIQUE code, and returns the Database instance. Include error handling for schema creation.",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "Running node -e \"require('./src/db').initDb(':memory:')\" does not throw.",
+    "The returned Database has a table `links` with columns code (TEXT PRIMARY KEY), url (TEXT NOT NULL), created_at (INTEGER NOT NULL)."
+   ]
+  },
+  {
+   "id": "T2",
+   "title": "Implement rate limiter",
+   "module": "rateLimiter",
+   "prompt": "Create src/rateLimiter.js exporting createLimiter() that uses express-rate-limit to enforce 60 requests per minute per IP, returns JSON error with status 429 and includes Retry-After header. Respect TRUST_PROXY env var when determining IP.",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "createLimiter() returns a function usable as Express middleware.",
+    "When more than 60 requests from same IP within a minute are made, the response status is 429 and body contains `{error:\"rate limit exceeded\"}`."
+   ]
+  },
+  {
+   "id": "T3",
+   "title": "Implement routes",
+   "module": "routes",
+   "prompt": "Create src/routes.js exporting register(app). Implement POST /shorten (validate JSON, generate 7\u2011char base62 code with crypto.randomInt, retry up to 5 times on DB UNIQUE violation, store mapping, return 201 JSON), GET /:code (validate pattern, lookup, 302 redirect or 404 JSON), GET /healthz (200 JSON). Use db module for storage and rateLimiter for middleware where needed.",
+   "tier": "deep",
+   "depends_on": [
+    "T1",
+    "T2"
+   ],
+   "acceptance": [
+    "POST /shorten with a valid URL returns 201 and JSON containing a 7\u2011char base62 code.",
+    "GET /<code> for a stored code returns 302 redirect to original URL.",
+    "GET /unknowncode returns 404 with JSON error.",
+    "GET /healthz returns 200 with `{status:\"ok\"}`."
+   ]
+  },
+  {
+   "id": "T4",
+   "title": "Create app factory",
+   "module": "app",
+   "prompt": "Create src/app.js exporting createApp(config). It should set trust proxy based on config.trustProxy, install express.json(), the rate limiter from rateLimiter, and register routes from routes module. Return the Express instance without calling listen.",
+   "tier": "standard",
+   "depends_on": [
+    "T2",
+    "T3"
+   ],
+   "acceptance": [
+    "createApp({dbPath: ':memory:'}) returns an Express app that can be used with supertest.",
+    "When TRUST_PROXY env var is set, app.get('trust proxy') reflects the value."
+   ]
+  },
+  {
+   "id": "T5",
+   "title": "Implement server entry point",
+   "module": "server",
+   "prompt": "Create src/server.js that reads env vars PORT (default 3000), DB_PATH, TRUST_PROXY, creates the app via createApp, and starts listening. Log \"Server listening on PORT\" to stdout.",
+   "tier": "light",
+   "depends_on": [
+    "T4"
+   ],
+   "acceptance": [
+    "Running node src/server.js starts an HTTP server on the specified PORT.",
+    "The server responds to /healthz with 200."
+   ]
+  },
+  {
+   "id": "T6",
+   "title": "Write integration tests",
+   "module": "apiTests",
+   "prompt": "Create test/api.test.js using node:test and supertest. Start the app with an in\u2011memory DB, run tests for all behaviours listed in the acceptance of T3 and the rate\u2011limit test (61st request returns 429). Add an npm test script in package.json.",
+   "tier": "standard",
+   "depends_on": [
+    "T4"
+   ],
+   "acceptance": [
+    "npm test runs and all test cases pass.",
+    "The rate\u2011limit test confirms the 61st request within a minute receives 429."
+   ]
+  },
+  {
+   "id": "T7",
+   "title": "Add Dockerfile and supporting files",
+   "module": "none",
+   "prompt": "Create a multi\u2011stage Dockerfile using node:lts\u2011alpine, install build dependencies for better\u2011sqlite3, copy source, run npm ci, create non\u2011root user, set WORKDIR /app, expose 3000, declare VOLUME /data, and set CMD [\"node\",\"src/server.js\"]. Also add .dockerignore, docker-compose.yml, README with run instructions, LICENSE (MIT), and .gitignore.",
+   "tier": "deep",
+   "depends_on": [
+    "T5",
+    "T6"
+   ],
+   "acceptance": [
+    "docker build -t pipez . succeeds.",
+    "docker run -p 3000:3000 -v pipez-data:/data pipez returns 200 on /healthz."
+   ]
+  }
+ ],
+ "scaffold_commands": [
+  "git init .",
+  "npm init -y",
+  "npm install express better-sqlite3 express-rate-limit",
+  "npm install --save-dev supertest"
+ ],
+ "build_command": "npm run build || echo 'no build step'",
+ "test_command": "npm test",
+ "deploy": {
+  "target": "none",
+  "install_commands": [],
+  "start_command": "",
+  "port": 0,
+  "health_path": "",
+  "env": [
+   {
+    "name": "PORT",
+    "value": ""
+   },
+   {
+    "name": "DB_PATH",
+    "value": ""
+   },
+   {
+    "name": "TRUST_PROXY",
+    "value": ""
+   },
+   {
+    "name": "BASE_URL",
+    "value": ""
+   }
+  ]
+ }
+}

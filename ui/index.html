@@ -1152,7 +1152,20 @@ async function refreshPlan(runId) {
 function planMetaLines(m) {
   if (!m) return "";
   let h = "";
-  for (const w of m.warnings || []) h += `<div class="err">Warning: ${esc(w)}</div>`;
+  const g = m.gate;
+  if (g) {
+    const last = (g.rounds || [])[g.rounds.length - 1] || { errors: 0, warnings: 0, violations: [] };
+    h += `<div class="summary">Plan gate: ` + (g.passed
+      ? `passed after ${(g.rounds || []).length - 1} rounds`
+      : `${last.errors} errors, ${last.warnings} warnings remain`) + `</div>`;
+    for (const x of last.violations || [])
+      h += `<div class="${x.severity === "error" ? "err" : "summary"}">` +
+        `${esc(x.severity === "error" ? "Error" : "Warn")}: [${esc(x.code)}] ` +
+        `${esc(x.subject)}: ${esc(x.message)}</div>`;
+  }
+  const gated = new Set((g && (g.rounds || []).length ? g.rounds[g.rounds.length - 1].violations : [])
+    .map(x => `[${x.code}] ${x.subject}: ${x.message}`));
+  for (const w of m.warnings || []) if (!gated.has(w)) h += `<div class="err">Warning: ${esc(w)}</div>`;
   if (m.model || m.output_tokens != null)
     h += `<div class="summary">${esc([m.model, (m.output_tokens ?? 0) + " output tokens",
       (m.seconds ?? 0) + " s"].filter(Boolean).join(" · "))}</div>`;

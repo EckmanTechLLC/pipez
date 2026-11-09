@@ -14,7 +14,7 @@ import re
 import shlex
 import time
 
-from . import config, seed_prompts
+from . import config, plangate, seed_prompts
 from .llm import LLMError
 from .prefs import PreferenceStore
 from .providers import OpenAICompatProvider
@@ -83,30 +83,31 @@ class Engine:
         self._pve_factory = pve_factory     # None: ProxmoxClient() when PVE is configured
         self._merge_locks: dict = {}
         self._kills: set = set()     # in-flight remote runner kills
-        self._local_down = False
-        self._probe_task = None
-        if "local" in config.MODEL_TIERS:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-            if loop:
-                self._probe_task = loop.create_task(self._probe_local())
+        self._local_down: set = set()    # local tiers that failed the probe
+        self._probe_tasks = []
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop:
+            for name in config.LOCAL_TIERS:
+                if name in config.MODEL_TIERS:
+                    self._probe_tasks.append(loop.create_task(self._probe_local(name)))
 
-    async def _probe_local(self):
-        """One-shot health probe of the local provider; on failure, tasks
-        assigned to `local` resolve to the next tier up."""
+    async def _probe_local(self, name: str = "local"):
+        """One-shot health probe of a local tier's provider; on failure, tasks
+        assigned to that tier resolve to the next tier up."""
         providers = getattr(self.llm, "providers", None) or {}
         provider = providers.get("openai_compat") or OpenAICompatProvider()
         try:
-            ok = await provider.healthy()
+            ok = await provider.healthy(config.MODEL_TIERS.get(name))
         except Exception:
             ok = False
         if not ok:
-            logger.warning("local provider at %s is unavailable; "
-                           "local-tier tasks will use the next tier up",
-                           config.LOCAL_BASE_URL)
-            self._local_down = True
+            logger.warning("%s provider at %s is unavailable; "
+                           "%s tasks will use the next tier up", name,
+                           (config.MODEL_TIERS.get(name) or {}).get("base_url"), name)
+            self._local_down.add(name)
 
     async def _llm_call(self, task: dict, fn):
         """Run fn(tier_dict) for the task's tier, applying the per-task effort
@@ -124,10 +125,10 @@ class Engine:
             self._update(task_id, tier=new)
             name = new
 
-        if name == "local" and self._local_down:
-            new = config.next_tier_up("local")
+        if name in self._local_down:
+            new = config.next_tier_up(name)
             if new:
-                move(new, "local provider unavailable")
+                move(new, "%s provider unavailable" % name)
         while True:
             tier = config.MODEL_TIERS[name]
             if task.get("effort"):
@@ -161,12 +162,12 @@ class Engine:
         task_log under task_id 'run:<run_id>'."""
         log_id = "run:%s" % run_id
         name = tier_name if tier_name in config.MODEL_TIERS else config.DEFAULT_TIER
-        if name == "local" and self._local_down:
-            new = config.next_tier_up("local")
+        if name in self._local_down:
+            new = config.next_tier_up(name)
             if new:
                 self.db.log(log_id, "escalated",
                             {"from": name, "to": new,
-                             "reason": "local provider unavailable"})
+                             "reason": "%s provider unavailable" % name})
                 name = new
         while True:
             try:
@@ -264,7 +265,7 @@ class Engine:
             started = time.time()
             (out, usage), tier_name = await self._run_llm_call(
                 run_id,
-                "local" if config.local_allowed("intake") else config.INTAKE_TIER,
+                config.stage_tier("intake", config.INTAKE_TIER),
                 lambda tier: self.llm.intake(system, prompt, tier))
             self._add_spend(run_id, None, "intake", usage)
             request_values = out.get("request_values") or {}
@@ -447,7 +448,7 @@ class Engine:
             system, prompt = self._brief_prompt(run, sources)
             started = time.time()
             (out, usage), tier_name = await self._run_llm_call(
-                run_id, "local" if config.local_allowed("brief") else "standard",
+                run_id, config.stage_tier("brief", "standard"),
                 lambda tier: self.llm.brief(system, prompt, tier))
             self._add_spend(run_id, None, "brief", usage)
             text = out["brief"].rstrip()
@@ -552,9 +553,19 @@ class Engine:
         revisions = (run.get("plan_meta") or {}).get("revisions") or []
         return bool(run.get("plan") and revisions)
 
-    def _plan_prompt(self, run: dict) -> tuple:
+    @staticmethod
+    def _revision_sections(plan: dict, header: str, note: str) -> list:
+        """The `# Previous plan` + REVISION NOTE prompt sections; human and
+        gate notes render the same way."""
+        return ["# Previous plan\n%s" % json.dumps(plan, indent=2),
+                "REVISION NOTE (%s):\n%s" % (header, note)]
+
+    def _plan_prompt(self, run: dict, gate_plan: dict = None,
+                     gate_note: str = None) -> tuple:
         """(system, prompt) of the plan call; includes the previous plan and
-        the last human note when `run` is a revision."""
+        the last human note when `run` is a revision. With `gate_note`, the
+        previous plan is `gate_plan` and the automated gate note is appended
+        (after the human note, if any)."""
         meta = run.get("plan_meta") or {}
         revisions = meta.get("revisions") or []
         system = (self.db.get_prompt("plan_architect") or "") + (
@@ -570,12 +581,19 @@ class Engine:
         if existing:
             parts.append(existing)
         system += "\n\nAllowed tiers: %s." % ", ".join(config.offered_tiers("plan"))
-        if run.get("plan") and revisions:
-            parts.append("# Previous plan\n%s"
-                         % json.dumps(run["plan"], indent=2))
-            parts.append("REVISION NOTE (from the human reviewer; revise "
-                         "the previous plan accordingly):\n%s"
-                         % revisions[-1]["note"])
+        human = ("from the human reviewer; revise the previous plan "
+                 "accordingly")
+        if gate_note:
+            prev, gate = self._revision_sections(
+                gate_plan, "automated plan gate", gate_note)
+            parts.append(prev)
+            if run.get("plan") and revisions:
+                parts.append("REVISION NOTE (%s):\n%s"
+                             % (human, revisions[-1]["note"]))
+            parts.append(gate)
+        elif run.get("plan") and revisions:
+            parts.extend(self._revision_sections(
+                run["plan"], human, revisions[-1]["note"]))
         return system, "\n\n".join(parts)
 
     async def _plan(self, run_id: str):
@@ -598,6 +616,39 @@ class Engine:
                     system, prompt, dict(tier, effort=plan_effort)))
             self._add_spend(run_id, None, "plan", usage)
             plan = self._validate_plan(run_id, out)
+            gate_mode = config.PLAN_GATE_MODE
+            gate, violations = None, []
+            if gate_mode != "off":
+                violations = plangate.check_plan(plan)
+                gate = {"mode": gate_mode, "rounds": [], "passed": False}
+                gate["rounds"].append(self._gate_round(violations))
+                while (gate_mode == "revise"
+                       and any(x["severity"] == "error" for x in violations)
+                       and len(gate["rounds"]) - 1 < config.PLAN_GATE_MAX_ROUNDS):
+                    n = len(gate["rounds"])
+                    last = gate["rounds"][-1]
+                    self.db.log("run:%s" % run_id, "plan_gate_revise",
+                                {"round": n, "errors": last["errors"],
+                                 "warnings": last["warnings"]})
+                    gsystem, gprompt = self._plan_prompt(
+                        run, gate_plan=plan,
+                        gate_note=plangate.format_note(violations))
+                    self.db.log("run:%s" % run_id, "plan_call",
+                                {"revision": True, "tier": config.PLAN_REVISION_TIER,
+                                 "effort": config.PLAN_REVISION_EFFORT,
+                                 "gate_round": n})
+                    started_g = time.time()
+                    (out, usage), tier_name = await self._run_llm_call(
+                        run_id, config.PLAN_REVISION_TIER,
+                        lambda tier: self.llm.plan(
+                            gsystem, gprompt,
+                            dict(tier, effort=config.PLAN_REVISION_EFFORT)))
+                    self._add_spend(run_id, None, "plan", usage)
+                    plan = self._validate_plan(run_id, out)
+                    violations = plangate.check_plan(plan)
+                    gate["rounds"].append(self._gate_round(violations))
+                gate["passed"] = not any(
+                    x["severity"] == "error" for x in violations)
             warnings = []
             nt, nm = len(plan.get("tasks") or []), len(plan.get("modules") or [])
             if nt > config.PLAN_MAX_TASKS:
@@ -611,14 +662,23 @@ class Engine:
                             {"tasks": nt, "modules": nm,
                              "max_tasks": config.PLAN_MAX_TASKS,
                              "max_modules": config.PLAN_MAX_MODULES})
-            warnings.extend(self._plan_rule_warnings(plan))
-            self.db.set_plan(run_id, plan, {
+            if gate is None:
+                warnings.extend(self._plan_rule_warnings(plan))
+            else:
+                warnings.extend(
+                    "[%s] %s: %s" % (x["code"], x["subject"], x["message"])
+                    for x in sorted(violations,
+                                    key=lambda x: x["severity"] != "error"))
+            meta_out = {
                 "warnings": warnings,
                 "tier": tier_name, "model": usage.get("model"),
                 "input_tokens": usage.get("input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0),
                 "seconds": round(time.time() - started, 3),
-                "revisions": revisions})
+                "revisions": revisions}
+            if gate is not None:
+                meta_out["gate"] = gate
+            self.db.set_plan(run_id, plan, meta_out)
             self._set_plan_phase(run_id, "awaiting_plan")
         except Exception as e:
             logger.exception("planning of run %s failed", run_id)
@@ -682,42 +742,16 @@ class Engine:
             out["target"] = "none"      # cannot deploy without a command and a port
         return out
 
-    # Phrases implying execution against a host (not mere mention of deploy).
-    _DEPLOY_RE = re.compile(
-        r"\b(ssh|scp)\s+(to|into)?\s*\S*(vm|host|server)"
-        r"|\b(live|real|remote)\s+(\w+\s+)?(vm|host|server|machine)\b"
-        r"|\blive\s+(re)?deploy"
-        r"|\bredeploy\b"
-        r"|\bdeploy(s|ed|ing)?\s+(it\s+)?(to|on)\s+(the\s+|an?\s+)?(\w+\s+){0,3}(vm|host|server)\b"
-        r"|\bon\s+the\s+(vm|host|server)\b"
-        r"|\bsmoke[- ]?test(s|ing)?\s+(the\s+)?(live|deployed|running)\b", re.I)
-    # Tasks whose title starts with these verbs are file-authoring: skipped.
-    _AUTHOR_RE = re.compile(
-        r"^\s*(write|author|add|create|update|document|readme)\b", re.I)
-    _PROCESS_RE = re.compile(
-        r"\b(the report|build report|git diff|marked (as )?NOT RUN|"
-        r"tool unavailable|shellcheck)\b", re.I)
+    @staticmethod
+    def _gate_round(violations: list) -> dict:
+        errors = sum(1 for x in violations if x["severity"] == "error")
+        return {"errors": errors, "warnings": len(violations) - errors,
+                "violations": violations}
 
     def _plan_rule_warnings(self, plan: dict) -> list:
-        """Non-fatal planner-rule checks (false positives are only warnings).
-        task_touches_deployment: title/prompt mentions deploy/ssh/etc. and is
-        not file-authoring (title starting Write/Author/Add/Create/Update/
-        Document/README).
-        process_acceptance_criteria: a criterion about the builder's report
-        or process rather than the product."""
-        out = []
-        for t in plan.get("tasks") or []:
-            title = t.get("title") or ""
-            text = "%s\n%s" % (title, t.get("prompt") or "")
-            if not self._AUTHOR_RE.search(title) and self._DEPLOY_RE.search(text):
-                out.append("task_touches_deployment: task %s (%s) looks "
-                           "like a deployment/remote step; pipez deploys "
-                           "after integration" % (t.get("id"), title))
-            for a in t.get("acceptance") or []:
-                if self._PROCESS_RE.search(a):
-                    out.append("process_acceptance_criteria: task %s: %s"
-                               % (t.get("id"), a))
-        return out
+        """Non-fatal planner-rule checks (task_touches_deployment,
+        process_acceptance_criteria); logic lives in pipez.plangate."""
+        return plangate.heuristic_warnings(plan)
 
     def _validate_plan(self, run_id: str, plan: dict) -> dict:
         """Return a cleaned copy of the plan. Unknown / duplicate / cyclic
@@ -840,9 +874,9 @@ class Engine:
         self._publish_task(root)
         children = []
         for i, t in enumerate(plan["tasks"]):
-            if t.get("tier") == "local":    # code tasks run on the Agent SDK
+            if config.is_local(t.get("tier")):    # code tasks run on the Agent SDK
                 self.db.log("run:%s" % run_id, "tier_coerced",
-                            {"task": t.get("id"), "from": "local", "to": "light",
+                            {"task": t.get("id"), "from": t["tier"], "to": "light",
                              "reason": "code tasks run on the Agent SDK"})
                 t["tier"] = "light"
             mod = modules.get(t.get("module"))
@@ -2108,7 +2142,7 @@ class Engine:
 
     def _leaf_model(self, task: dict) -> str:
         name = task.get("tier") or ""
-        if name == "local":     # code tasks never run on local
+        if config.is_local(name):     # code tasks never run on local tiers
             name = "light"
         tier = config.MODEL_TIERS.get(name) or config.MODEL_TIERS["standard"]
         if tier.get("provider") != "anthropic":

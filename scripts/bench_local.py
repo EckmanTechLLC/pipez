@@ -31,7 +31,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from pipez import config  # noqa: E402
+from pipez import config, plangate  # noqa: E402
 from pipez.db import Database  # noqa: E402
 from pipez.engine import Engine  # noqa: E402
 from pipez.events import EventBus  # noqa: E402
@@ -62,6 +62,9 @@ def parse_args(argv=None):
                    help="intake/plan stages: call this tier (name[@effort]) first and "
                         "score the other tiers against its output instead of "
                         "the stored answer")
+    p.add_argument("--gate-rounds", type=int, default=0,
+                   help="plan stages: when the plan has gate errors, send up to N "
+                        "gate-note revision calls on the same tier (0 = measure only)")
     p.add_argument("--save-outputs", action="store_true",
                    help="store the raw output of every call in the JSON file")
     p.add_argument("--yes", action="store_true", help="proceed after the spend estimate")
@@ -156,6 +159,61 @@ def estimate(tiers, prompt_chars, stage) -> float:
     return total
 
 
+def _gate_counts(violations) -> tuple:
+    errs = sum(1 for v in violations if v["severity"] == "error")
+    return errs, len(violations) - errs
+
+
+def _clean(engine, out):
+    return engine._validate_plan("bench", out)
+
+
+async def _gate_loop(llm, engine, rec, stage, tier, tier_name, run, plan,
+                     violations, rounds, save=False):
+    """Gate-note revision rounds on the same tier; updates `rec` in place and
+    returns the final plan."""
+    errs = _gate_counts(violations)[0]
+    rec["gate_round_errors"] = [errs]
+    rec["gate_rounds_used"] = 0
+    rec["gate_passed"] = errs == 0
+    base = dict(run, plan=None) if stage == "plan" else run
+    fn = llm.plan
+    for _ in range(rounds):
+        if errs == 0:
+            break
+        system, prompt = engine._plan_prompt(
+            base, gate_plan=plan, gate_note=plangate.format_note(violations))
+        t0 = time.time()
+        try:
+            out, usage = await fn(system, prompt, tier)
+            plan = _clean(engine, out)
+        except Exception as e:
+            rec["seconds"] = round(rec["seconds"] + time.time() - t0, 2)
+            rec["gate_passed"] = False
+            rec["gate_round_error"] = str(e)[:500]
+            return plan
+        rec["seconds"] = round(rec["seconds"] + time.time() - t0, 2)
+        rec["input_tokens"] += usage.get("input_tokens", 0)
+        rec["output_tokens"] += usage.get("output_tokens", 0)
+        rec["cost"] += config.estimate_cost(
+            usage.get("model") or tier["model"],
+            usage.get("input_tokens", 0), usage.get("output_tokens", 0))
+        if save:
+            rec["final_output"] = out
+            rec["round_outputs"].append(out)
+        violations = plangate.check_plan(plan)
+        errs, warns = _gate_counts(violations)
+        rec["gate_rounds_used"] += 1
+        rec["gate_round_errors"].append(errs)
+        rec["gate_errors"], rec["gate_warnings"] = errs, warns
+        rec["gate_codes"] = sorted({v["code"] for v in violations
+                                    if v["severity"] == "error"})
+        if save:
+            rec["gate_violations"] = violations
+    rec["gate_passed"] = errs == 0
+    return plan
+
+
 def _jaccard(a: set, b: set) -> float:
     union = a | b
     return len(a & b) / len(union) if union else 1.0
@@ -221,7 +279,7 @@ def agreement_brief(out: dict, run: dict) -> dict:
 
 async def one_call(llm, stage, tier_name, system, prompt, run,
                    reference=None, is_reference=False, reference_tier=None,
-                   capture=None, save_output=False) -> dict:
+                   capture=None, save_output=False, engine=None, gate_rounds=0) -> dict:
     """One tier call. `reference` is the reference tier's output (None when it
     failed or is unused); `capture["out"]` receives this call's raw output."""
     tier = tier_dict(tier_name)
@@ -238,6 +296,8 @@ async def one_call(llm, stage, tier_name, system, prompt, run,
         rec.update(ok=True, schema_valid=True, seconds=round(time.time() - started, 2),
                    input_tokens=usage.get("input_tokens", 0),
                    output_tokens=usage.get("output_tokens", 0))
+        if usage.get("structured"):
+            rec["structured"] = usage["structured"]
         rec["cost"] = config.estimate_cost(usage.get("model") or tier["model"],
                                            rec["input_tokens"], rec["output_tokens"])
         if capture is not None:
@@ -251,6 +311,9 @@ async def one_call(llm, stage, tier_name, system, prompt, run,
             else:
                 rec.update(agreement_plan(out, run, reference))
             rec["output"] = out
+            if engine is not None and not is_reference:
+                await _plan_gate(llm, engine, rec, stage, tier_name, tier, run,
+                                 out, gate_rounds, save_output)
         elif stage == "intake" and is_reference:
             rec["agreement"] = "reference"
         elif stage == "intake" and reference_tier:
@@ -271,6 +334,31 @@ async def one_call(llm, stage, tier_name, system, prompt, run,
     return rec
 
 
+async def _plan_gate(llm, engine, rec, stage, tier_name, tier, run, out, rounds, save=False):
+    if save:
+        rec["final_output"] = out
+        rec["round_outputs"] = [out]
+    ref_plan = run.get("plan")
+    if ref_plan:
+        re_, rw = _gate_counts(plangate.check_plan(ref_plan))
+        rec["ref_gate_errors"], rec["ref_gate_warnings"] = re_, rw
+    try:
+        plan = _clean(engine, out)
+    except Exception as e:
+        rec["gate_error"] = "plan not cleanable: %s" % str(e)[:300]
+        return
+    violations = plangate.check_plan(plan)
+    errs, warns = _gate_counts(violations)
+    rec["gate_errors"], rec["gate_warnings"] = errs, warns
+    rec["gate_codes"] = sorted({v["code"] for v in violations
+                                if v["severity"] == "error"})
+    if save:
+        rec["gate_violations"] = violations
+    if rounds > 0:
+        await _gate_loop(llm, engine, rec, stage, tier, tier_name, run, plan,
+                         violations, rounds, save)
+
+
 def _mean(xs):
     xs = [x for x in xs if x is not None]
     return statistics.mean(xs) if xs else None
@@ -281,8 +369,11 @@ def _fmt(x, f="%.2f"):
 
 
 def plan_table(results) -> str:
-    lines = ["| stage | tier | n | ok% | p50 s | mean $ | mean out-tok | tasks | Δtasks | deploy-match% | forbidden% |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
+    rounds_on = any("gate_rounds_used" in r for r in results)
+    gate_cols = " pass% | rounds |" if rounds_on else ""
+    gate_sep = "---|---|" if rounds_on else ""
+    lines = ["| stage | tier | n | ok% | p50 s | mean $ | mean out-tok | tasks | Δtasks | deploy-match% | forbidden% | gate-err | ref-err |" + gate_cols,
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|" + gate_sep]
     for stage in PLAN_STAGES:
         for tier in dict.fromkeys(r["tier"] for r in results if r["stage"] == stage):
             rs = [r for r in results if r["stage"] == stage and r["tier"] == tier]
@@ -290,7 +381,14 @@ def plan_table(results) -> str:
             dm = [1.0 if r["deploy_target_match"] else 0.0 for r in oks
                   if r.get("deploy_target_match") is not None]
             fb = [1.0 if r["scaffold_forbidden"] else 0.0 for r in oks]
-            lines.append("| %s | %s | %d | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            gated = [r for r in oks if "gate_passed" in r]
+            passed = [r for r in gated if r["gate_passed"]]
+            extra = ""
+            if rounds_on:
+                extra = " %s | %s |" % (
+                    _fmt(100 * len(passed) / len(gated) if gated else None, "%.0f"),
+                    _fmt(_mean([r["gate_rounds_used"] for r in passed]), "%.1f"))
+            lines.append("| %s | %s | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 stage, tier, len(rs), _fmt(100 * len(oks) / len(rs), "%.0f"),
                 _fmt(statistics.median([r["seconds"] for r in rs]) if rs else None, "%.1f"),
                 _fmt(_mean([r["cost"] for r in rs]), "%.4f"),
@@ -298,7 +396,9 @@ def plan_table(results) -> str:
                 _fmt(_mean([r.get("tasks") for r in oks]), "%.1f"),
                 _fmt(_mean([r.get("task_count_delta") for r in oks]), "%+.1f"),
                 _fmt(None if not dm else 100 * _mean(dm), "%.0f"),
-                _fmt(None if not fb else 100 * _mean(fb), "%.0f")))
+                _fmt(None if not fb else 100 * _mean(fb), "%.0f"),
+                _fmt(_mean([r.get("gate_errors") for r in oks]), "%.1f"),
+                _fmt(_mean([r.get("ref_gate_errors") for r in oks]), "%.1f")) + extra)
     return "\n".join(lines)
 
 
@@ -354,7 +454,7 @@ def main(argv=None) -> int:
     unknown = [t for t in tiers + ([ref] if ref else [])
                if parse_tier(t)[0] not in config.MODEL_TIERS]
     if unknown:
-        print("tiers not configured: %s (local needs PIPEZ_LOCAL_BASE_URL/MODEL)"
+        print("tiers not configured: %s (local needs PIPEZ_LOCAL_BASE_URL/MODEL, local_reason PIPEZ_LOCAL_REASON_BASE_URL/MODEL)"
               % ", ".join(unknown), file=sys.stderr)
         return 2
     if not args.dry_run:
@@ -363,8 +463,12 @@ def main(argv=None) -> int:
         if any(config.MODEL_TIERS[t]["provider"] == "anthropic" for t in used) \
                 and not config.ANTHROPIC_API_KEY:
             need.append("ANTHROPIC_API_KEY")
-        if "local" in used and not (config.LOCAL_BASE_URL and config.LOCAL_MODEL):
-            need.append("PIPEZ_LOCAL_BASE_URL/PIPEZ_LOCAL_MODEL")
+        for lt, prefix, url, model in (
+                ("local", "PIPEZ_LOCAL", config.LOCAL_BASE_URL, config.LOCAL_MODEL),
+                ("local_reason", "PIPEZ_LOCAL_REASON", config.LOCAL_REASON_BASE_URL,
+                 config.LOCAL_REASON_MODEL)):
+            if lt in used and not (url and model):
+                need.append("%s_BASE_URL/%s_MODEL" % (prefix, prefix))
         if need:
             print("missing in env: %s" % ", ".join(need), file=sys.stderr)
             return 2
@@ -385,6 +489,8 @@ def main(argv=None) -> int:
             system, prompt = build_prompt(engine, run, stage)
             job_tiers = tiers_for(tiers, ref, stage)
             est = estimate(job_tiers, len(system) + len(prompt), stage)
+            if stage in PLAN_STAGES:
+                est *= 1 + max(args.gate_rounds, 0)
             spend += est
             calls += len(job_tiers)
             jobs.append((stage, run, system, prompt))
@@ -413,7 +519,8 @@ def main(argv=None) -> int:
                 rec = await one_call(llm, stage, t, system, prompt, run,
                                      reference=reference_out, is_reference=is_ref,
                                      reference_tier=use_ref or None, capture=cap,
-                                     save_output=args.save_outputs)
+                                     save_output=args.save_outputs, engine=engine,
+                                     gate_rounds=args.gate_rounds)
                 if is_ref:
                     reference_out = cap.get("out")
                 print("  %s %s %s ok=%s %.1fs" % (stage, run["id"], t, rec["ok"], rec["seconds"]))

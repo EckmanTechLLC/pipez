@@ -12,6 +12,7 @@ import re
 import time
 
 import httpx2 as httpx  # anthropic 1.13 depends on httpx2, not httpx
+import jsonschema
 
 from . import config
 
@@ -24,6 +25,21 @@ class LLMError(Exception):
 
 class ProviderTransientError(LLMError):
     """Transport error or HTTP 5xx from a provider — worth a slow retry."""
+
+
+class ProviderTimeoutError(LLMError):
+    """Local call exceeded its client timeout — retrying would stack identical runaways."""
+    retryable = False
+
+
+class ProviderSchemaError(LLMError):
+    """Local output parsed but violates the call's schema — an identical retry is unlikely to differ."""
+    retryable = False
+
+
+class ProviderTruncatedError(LLMError):
+    """Local call hit max_tokens — an identical retry would truncate again."""
+    retryable = False
 
 
 def is_transient(e: Exception) -> bool:
@@ -204,30 +220,56 @@ class OpenAICompatProvider(Provider):
         return httpx.AsyncClient(transport=self._transport, timeout=timeout)
 
     @staticmethod
-    def _headers() -> dict:
-        if config.LOCAL_API_KEY:
-            return {"Authorization": "Bearer %s" % config.LOCAL_API_KEY}
+    def _headers(tier: dict = None) -> dict:
+        tier = tier or {}
+        key = tier["api_key"] if "api_key" in tier else config.LOCAL_API_KEY
+        if key:
+            return {"Authorization": "Bearer %s" % key}
         return {}
+
+    @staticmethod
+    def _get(tier: dict, key: str, default):
+        return tier[key] if key in tier else default
 
     async def complete(self, system: str, prompt: str, schema: dict, tier: dict,
                        *, fetch: bool = False) -> tuple[dict, dict]:
         base = (tier.get("base_url") or config.LOCAL_BASE_URL).rstrip("/")
+        g = self._get
+        reasoning = g(tier, "reasoning_effort", None)
+        max_tokens = g(tier, "max_tokens", config.MAX_TOKENS)
+        timeout = g(tier, "timeout", config.LOCAL_TIMEOUT)
+        mode = g(tier, "structured", "json_schema")
+        if mode not in ("json_schema", "json_object", "prompt"):
+            mode = "json_schema"
+        if mode != "json_schema":
+            prompt = ("%s\n\n## Output format\nRespond with ONLY one JSON object, no prose "
+                      "and no code fence, that validates against this JSON Schema:\n%s"
+                      % (prompt, json.dumps(schema)))
         body = {
             "model": tier["model"],
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": prompt}],
-            "max_tokens": config.MAX_TOKENS,
-            "temperature": config.LOCAL_TEMPERATURE,
-            "response_format": {"type": "json_schema",
-                                "json_schema": {"name": "out", "schema": schema,
-                                                "strict": True}},
-            "chat_template_kwargs": {"enable_thinking": config.LOCAL_THINKING},
+            "max_tokens": max_tokens,
+            "temperature": g(tier, "temperature", config.LOCAL_TEMPERATURE),
+            "chat_template_kwargs": {"enable_thinking": g(tier, "thinking", config.LOCAL_THINKING)},
         }
+        if mode == "json_schema":
+            body["response_format"] = {"type": "json_schema",
+                                       "json_schema": {"name": "out", "schema": schema,
+                                                       "strict": True}}
+        elif mode == "json_object":
+            body["response_format"] = {"type": "json_object"}
+        if reasoning:
+            body["reasoning_effort"] = reasoning
         try:
             started = time.monotonic()
-            async with self._client(config.LOCAL_TIMEOUT) as client:
+            async with self._client(timeout) as client:
                 resp = await client.post(base + "/v1/chat/completions",
-                                         json=body, headers=self._headers())
+                                         json=body, headers=self._headers(tier))
+        except httpx.TimeoutException as e:
+            raise ProviderTimeoutError(
+                "local provider timed out after %ss (model %s, %s)"
+                % (timeout, tier.get("model"), base))
         except httpx.HTTPError as e:
             raise ProviderTransientError("local provider transport error: %r" % e)
         if resp.status_code >= 500:
@@ -245,26 +287,46 @@ class OpenAICompatProvider(Provider):
         if choice.get("finish_reason") == "length":
             elapsed = time.monotonic() - started
             out_tok = (data.get("usage") or {}).get("completion_tokens", 0)
-            raise LLMError("response truncated at max_tokens (local: %.0fs, %s output tokens)"
-                           % (elapsed, out_tok))
+            raise ProviderTruncatedError(
+                "response truncated at max_tokens=%s (local: %.0fs, %s output tokens)"
+                % (max_tokens, elapsed, out_tok))
         content = _THINK_RE.sub("", content, count=1)
+        if mode != "json_schema":
+            lo, hi = content.find("{"), content.rfind("}")
+            if lo != -1 and hi > lo:
+                content = content[lo:hi + 1]
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError as e:
             raise LLMError("local provider returned invalid JSON: %s" % e)
+        try:
+            validator = jsonschema.validators.validator_for(
+                schema, default=jsonschema.Draft7Validator)(schema)
+            err = next(iter(validator.iter_errors(parsed)), None)
+        except jsonschema.SchemaError as e:
+            logger.warning("cannot validate local output, bad schema: %s", e.message)
+            err = None
+        if err is not None:
+            logger.debug("local output failing schema: %s", content[:500])
+            raise ProviderSchemaError(
+                "local output violates schema at %s: %s (structured=%s, model %s)"
+                % (err.json_path, err.message, mode, tier.get("model")))
         u = data.get("usage") or {}
         usage = {"input_tokens": u.get("prompt_tokens", 0),
                  "output_tokens": u.get("completion_tokens", 0),
-                 "model": data.get("model") or tier["model"]}
+                 "model": data.get("model") or tier["model"],
+                 "structured": mode}
         return parsed, usage
 
-    async def healthy(self) -> bool:
-        if not config.LOCAL_BASE_URL:
+    async def healthy(self, tier: dict = None) -> bool:
+        tier = tier or {}
+        base = tier.get("base_url") or config.LOCAL_BASE_URL
+        if not base:
             return False
         try:
             async with self._client(5.0) as client:
-                resp = await client.get(config.LOCAL_BASE_URL.rstrip("/") + "/v1/models",
-                                        headers=self._headers())
+                resp = await client.get(base.rstrip("/") + "/v1/models",
+                                        headers=self._headers(tier))
             return resp.status_code == 200
         except httpx.HTTPError:
             return False

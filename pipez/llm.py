@@ -314,6 +314,9 @@ class LLM:
                 return await provider.complete(system, prompt, schema, tier,
                                                fetch=fetch)
             except Exception as e:
+                if getattr(e, "retryable", True) is False:
+                    logger.warning("not retrying: %s", e)
+                    raise
                 if is_transient(e):
                     last_error = e
                 elif isinstance(e, LLMError) and "truncated" in str(e):

@@ -1,0 +1,1427 @@
+{
+  "db": "/tmp/claude-1000/-home-etl-projects-pipez/da67daff-717b-431c-aaf0-b7dcbbb0d8fb/scratchpad/bench/vm.sqlite3",
+  "tiers": [
+    "local_reason"
+  ],
+  "reference_tier": null,
+  "stages": [
+    "plan"
+  ],
+  "estimated_spend": 0.0,
+  "results": [
+    {
+      "run_id": "883909b06334",
+      "stage": "plan",
+      "tier": "local_reason",
+      "model": "gpt-oss-120b",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 154.38,
+      "input_tokens": 3184,
+      "output_tokens": 5692,
+      "structured": "json_object",
+      "cost": 0.0,
+      "tasks": 9,
+      "modules": 6,
+      "deploy_target": "vm",
+      "deploy_target_match": true,
+      "task_count_delta": 0,
+      "scaffold_forbidden": false,
+      "has_test_command": true,
+      "plan_chars": 11837,
+      "output": {
+        "architecture": "The system consists of three runtime components: a **Node.js Express server** (src/server) that serves static assets from the `public` directory on port 3000, a **pure\u2011logic core module** (src/core) that implements all game rules, day\u2011index calculation, scoring, streak updates and share\u2011text generation without any DOM dependency, and a **client\u2011side UI** (public) built with vanilla HTML, CSS and JavaScript. The UI loads the core module as an ES module, renders the board, handles physical and on\u2011screen QWERTY keyboard input, persists the current game state and statistics in `localStorage`, and provides a theme toggle (light/dark/auto) that follows `prefers\u2011color\u2011scheme` and is stored in `localStorage`. Word lists (answers and allowed guesses) are shipped as JSON files in `data` and imported by the core module. All assets are self\u2011hosted; there is no build step, no framework, and no external requests. The licence is MIT, enforced by a top\u2011level `LICENSE` file. The placeholder game name `Lexle` lives in a constant in the client script and in the HTML title, making it easy to rename. The server reads the optional `PORT` environment variable, defaulting to 3000, satisfying the VM hosting decision. The core logic is unit\u2011tested with Node\u2019s built\u2011in test runner, and a smoke test verifies that the server returns HTTP\u202f200 for `/`.",
+        "stack": [
+          "Node.js",
+          "Express",
+          "vanilla JavaScript (ES modules)",
+          "HTML5",
+          "CSS3"
+        ],
+        "repo_layout": "```\n.\n\u251c\u2500 package.json\n\u251c\u2500 LICENSE\n\u251c\u2500 README.md\n\u251c\u2500 .gitignore\n\u251c\u2500 data\n\u2502  \u251c\u2500 answers.json\n\u2502  \u2514\u2500 guesses.json\n\u251c\u2500 src\n\u2502  \u251c\u2500 core\n\u2502  \u2502   \u2514\u2500 index.js\n\u2502  \u2514\u2500 server\n\u2502      \u2514\u2500 index.js\n\u251c\u2500 public\n\u2502  \u251c\u2500 index.html\n\u2502  \u251c\u2500 style.css\n\u2502  \u2514\u2500 js\n\u2502      \u2514\u2500 app.js\n\u2514\u2500 test\n    \u251c\u2500 core.test.mjs\n    \u2514\u2500 server.test.mjs\n```",
+        "modules": [
+          {
+            "name": "repo",
+            "path": ".",
+            "purpose": "Repository scaffolding: package.json, LICENSE (MIT), README, .gitignore and npm scripts.",
+            "depends_on": [],
+            "contract": "Provides the following files:\n- package.json with start and test scripts.\n- LICENSE containing the MIT licence text.\n- README.md with basic usage instructions.\n- .gitignore excluding node_modules and build artefacts.\nNo runtime exports."
+          },
+          {
+            "name": "wordlists",
+            "path": "data",
+            "purpose": "Stores the curated answer list and the superset of allowed guesses.",
+            "depends_on": [],
+            "contract": "Exports two JSON arrays:\n- `answers`: string[] \u2013 the ordered list of daily solutions.\n- `allowedGuesses`: string[] \u2013 a superset containing all valid guess words.\nBoth are loaded by the core module."
+          },
+          {
+            "name": "core",
+            "path": "src/core",
+            "purpose": "Pure game logic, independent of any UI or server.",
+            "depends_on": [
+              "wordlists"
+            ],
+            "contract": "Exports the following functions:\n- `getDayIndex(date: Date): number` \u2013 computes whole days since a fixed epoch using UTC components.\n- `getAnswerForDate(date: Date): string` \u2013 selects the answer via `answers[dayIndex % answers.length]`.\n- `scoreGuess(guess: string, answer: string): {tiles: ('green'|'yellow'|'gray')[]}` \u2013 two\u2011pass algorithm handling duplicate letters.\n- `generateShareText(name: string, dayNumber: number, guesses: string[], result: string): string` \u2013 builds the emoji grid copy\u2011to\u2011clipboard text.\n- `updateStreak(stats: object, today: Date, won: boolean): object` \u2013 returns updated stats with streak logic.\nAll functions are pure and have no DOM or network dependencies."
+          },
+          {
+            "name": "server",
+            "path": "src/server",
+            "purpose": "Express server that serves static assets and exposes a health endpoint.",
+            "depends_on": [
+              "repo",
+              "core",
+              "wordlists"
+            ],
+            "contract": "Exports `startServer(port: number): void` which:\n- Creates an Express app.\n- Serves the `public` directory at `/`.\n- Listens on the supplied port (default 3000).\n- Provides a GET `/` route that returns HTTP\u202f200.\nNo other routes are defined."
+          },
+          {
+            "name": "ui",
+            "path": "public",
+            "purpose": "Client\u2011side HTML, CSS and JavaScript that implements the playable game.",
+            "depends_on": [
+              "core"
+            ],
+            "contract": "Files:\n- `index.html` \u2013 markup with placeholder title using the constant `GAME_NAME`.\n- `style.css` \u2013 CSS variables for light, dark and auto themes, responsive layout.\n- `js/app.js` \u2013 ES module that imports core functions, renders the board, handles physical and on\u2011screen keyboard input, persists state and stats in `localStorage`, manages the theme toggle, and implements the share button using `navigator.clipboard` with a textarea fallback.\nExports no Node symbols; it runs in the browser."
+          },
+          {
+            "name": "tests",
+            "path": "test",
+            "purpose": "Automated test suite executed with `node --test`.",
+            "depends_on": [
+              "core",
+              "server"
+            ],
+            "contract": "Contains:\n- `core.test.mjs` \u2013 unit tests for all core functions, covering duplicate\u2011letter scoring, day\u2011index calculation, streak updates and share\u2011text generation.\n- `server.test.mjs` \u2013 a smoke test that starts the server (on an ephemeral port) and asserts that GET `/` returns status 200.\nRunning `npm test` executes both files via Node\u2019s built\u2011in test runner."
+          }
+        ],
+        "tasks": [
+          {
+            "id": "T1",
+            "title": "Initialize repository scaffolding",
+            "module": "repo",
+            "prompt": "Create `package.json` (use `npm init -y`), add MIT `LICENSE`, a minimal `README.md` with install/start instructions, and a `.gitignore` that excludes `node_modules/`. Add npm scripts: `\"start\": \"node src/server/index.js\"` and `\"test\": \"node --test\"`.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [],
+            "acceptance": [
+              "package.json exists",
+              "LICENSE file exists and contains the MIT licence header",
+              "README.md exists",
+              ".gitignore exists and lists node_modules/"
+            ]
+          },
+          {
+            "id": "T2",
+            "title": "Add curated word lists",
+            "module": "wordlists",
+            "prompt": "Create `data/answers.json` with ~1500 common five\u2011letter answer words and `data/guesses.json` with a superset of allowed guesses (at least 5000 words). Ensure both files are valid JSON arrays of strings and include a comment in the repository root `NOTICE` documenting the source and its licence.",
+            "tier": "standard",
+            "effort": "medium",
+            "depends_on": [
+              "T1"
+            ],
+            "acceptance": [
+              "data/answers.json exists and parses to a non\u2011empty array",
+              "data/guesses.json exists and parses to a non\u2011empty array",
+              "NOTICE file mentions the word\u2011list source and licence"
+            ]
+          },
+          {
+            "id": "T3",
+            "title": "Implement core game logic",
+            "module": "core",
+            "prompt": "Create `src/core/index.js` exporting the functions defined in the core contract. Use the two\u2011pass algorithm for `scoreGuess` to correctly handle duplicate letters. Compute the day index using `Date.UTC` on local year/month/day components. Export `GAME_EPOCH` constant (e.g., 2022\u201101\u201101) for reproducibility.",
+            "tier": "deep",
+            "effort": "medium",
+            "depends_on": [
+              "T2",
+              "T1"
+            ],
+            "acceptance": [
+              "core module exports `getDayIndex` that returns 0 for the epoch date",
+              "core module exports `scoreGuess` that returns correct tile colours for guess \"BALMY\" vs answer \"MUMMY\" (expected pattern: gray, yellow, gray, green, gray)",
+              "core module exports `generateShareText` that produces a string containing the emoji grid"
+            ]
+          },
+          {
+            "id": "T4",
+            "title": "Write core unit tests",
+            "module": "tests",
+            "prompt": "Create `test/core.test.mjs` using Node's built\u2011in test runner. Include tests for day\u2011index calculation, answer selection, duplicate\u2011letter scoring, streak update logic, and share\u2011text generation. Ensure the test file imports the core module via relative path.",
+            "tier": "standard",
+            "effort": "medium",
+            "depends_on": [
+              "T3"
+            ],
+            "acceptance": [
+              "Running `npm test` executes core tests and all pass"
+            ]
+          },
+          {
+            "id": "T5",
+            "title": "Implement Express static server",
+            "module": "server",
+            "prompt": "Create `src/server/index.js` that imports Express, serves the `public` directory, reads optional `PORT` env var (default 3000), and calls `app.listen`. Export a `startServer(port)` function as defined in the server contract.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [
+              "T1"
+            ],
+            "acceptance": [
+              "Server starts without error on port 3000",
+              "GET / returns HTTP 200 with the HTML page"
+            ]
+          },
+          {
+            "id": "T6",
+            "title": "Write server smoke test",
+            "module": "tests",
+            "prompt": "Create `test/server.test.mjs` that starts the server on an ephemeral port, performs an HTTP GET request to `/`, and asserts a 200 status code. Use Node's `http` or `node-fetch` (which is a built\u2011in experimental module) without adding extra dependencies.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [
+              "T5"
+            ],
+            "acceptance": [
+              "Running `npm test` executes the server smoke test and it passes"
+            ]
+          },
+          {
+            "id": "T7",
+            "title": "Create HTML and CSS skeleton",
+            "module": "ui",
+            "prompt": "Create `public/index.html` with a `<title>` that includes the placeholder constant `GAME_NAME` (e.g., \"Lexle\"). Add a container for the 6\u00d75 board, on\u2011screen keyboard markup, a result modal, and a theme toggle button. Write `public/style.css` defining CSS variables for `--bg`, `--tile-bg`, etc., and media query for `prefers-color-scheme`. Ensure the layout is responsive.",
+            "tier": "standard",
+            "effort": "medium",
+            "depends_on": [
+              "T1"
+            ],
+            "acceptance": [
+              "public/index.html exists and contains the placeholder title",
+              "style.css defines `--bg-light`, `--bg-dark`, and uses `prefers-color-scheme`"
+            ]
+          },
+          {
+            "id": "T8",
+            "title": "Implement client\u2011side JavaScript",
+            "module": "ui",
+            "prompt": "Create `public/js/app.js` as an ES module. Import the core functions. Implement:\n- Rendering of the board and keyboard.\n- Physical keyboard listeners for letters, Backspace and Enter.\n- On\u2011screen QWERTY keyboard click handling.\n- Validation of guesses against `allowedGuesses`.\n- Tile colour updates using the core `scoreGuess` result.\n- Persistence of current game state and statistics in `localStorage` with graceful fallback.\n- Streak logic using the core `updateStreak`.\n- Share button that builds the emoji grid via `generateShareText` and copies it using `navigator.clipboard.writeText` with a textarea fallback.\n- Theme toggle that respects system preference, stores the chosen mode in `localStorage`, and updates CSS variables.\n- Result modal showing win/loss, streak stats and the share button.\nAll UI interactions must be accessible (ARIA labels).",
+            "tier": "deep",
+            "effort": "high",
+            "depends_on": [
+              "T3",
+              "T7"
+            ],
+            "acceptance": [
+              "Loading the page allows entering a valid guess and shows green/yellow/gray tiles correctly",
+              "After a win, the result modal displays the correct streak and a functional Share button that copies the expected emoji grid",
+              "Theme toggle persists the selected mode across reloads"
+            ]
+          },
+          {
+            "id": "T10",
+            "title": "Add npm start script and verify build command",
+            "module": "repo",
+            "prompt": "Edit `package.json` to ensure the `start` script runs `node src/server/index.js`. Verify that `npm start` launches the server on the default port (or PORT env var) and that the process stays in the foreground.",
+            "tier": "light",
+            "effort": "low",
+            "depends_on": [
+              "T5",
+              "T4"
+            ],
+            "acceptance": [
+              "`npm start` launches the server and logs a listening message on port 3000"
+            ]
+          }
+        ],
+        "scaffold_commands": [
+          "npm init -y",
+          "npm install express",
+          "mkdir -p src/core src/server public/js data test"
+        ],
+        "build_command": "npm start",
+        "test_command": "npm test",
+        "deploy": {
+          "target": "vm",
+          "install_commands": [
+            "apt-get update -y",
+            "apt-get install -y nodejs npm",
+            "npm ci"
+          ],
+          "start_command": "node src/server/index.js",
+          "port": 3000,
+          "health_path": "/",
+          "env": [
+            {
+              "name": "PORT",
+              "value": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "run_id": "58b9853f2c47",
+      "stage": "plan",
+      "tier": "local_reason",
+      "model": "gpt-oss-120b",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 123.7,
+      "input_tokens": 3275,
+      "output_tokens": 5396,
+      "structured": "json_object",
+      "cost": 0.0,
+      "tasks": 9,
+      "modules": 8,
+      "deploy_target": "vm",
+      "deploy_target_match": true,
+      "task_count_delta": 0,
+      "scaffold_forbidden": false,
+      "has_test_command": true,
+      "plan_chars": 15983,
+      "output": {
+        "architecture": "The system consists of a single Node.js process that serves static client files over HTTP (built\u2011in http module) and upgrades WebSocket connections (ws library). Core responsibilities are split into modules:\n- **utils**: shared helpers (random join\u2011code generator, deep copy, timer utilities). Guarantees sufficient entropy and unambiguous alphabet for codes.\n- **game_core**: pure game logic for Tic\u2011Tac\u2011Toe (3\u00d73) and Connect Four (7\u00d76). Provides board representation, move validation, turn order, win/draw detection. Stateless and fully unit\u2011tested.\n- **bot**: server\u2011side AI offering three difficulty levels. Easy = random legal move with simple block/win checks; Medium = shallow look\u2011ahead; Hard = minimax (full for Tic\u2011Tac\u2011Toe, depth\u2011limited with alpha\u2011beta for Connect Four). Uses only game_core functions.\n- **persistence**: SQLite (better\u2011sqlite3) schema and DAO for finished\u2011match records (type, player names, bot flag/difficulty, winner, move list, timestamps). Path configurable via DB_PATH env var.\n- **rate_limiter**: in\u2011memory per\u2011IP limits for new connections, messages per second, and failed join\u2011code attempts. Violations receive an error and are throttled/disconnected.\n- **lobby**: manages active games in memory, generates short random join codes, tracks players and spectators, enforces the 60\u202fs reconnection grace period and 10\u202fmin idle deletion. Relies on utils, game_core, bot, persistence.\n- **http_server**: creates the HTTP server, serves the `public/` directory, implements `/health` endpoint, upgrades to WebSocket, routes messages to lobby, and enforces rate limits. Integrates all other modules.\n- **client**: vanilla HTML/CSS/JS served from `public/`. UI follows `prefers-color-scheme` for light/dark themes, provides lobby UI (code entry, game type, bot difficulty), game board rendering, spectator count, and displays static English text. No external assets or build step.\nAll decisions from the brief are honored: plain Node + ws (no Express), vanilla client, system theme, SQLite persistence, basic rate limiting, direct HTTP/ws on configurable port 3000, MIT license, no telemetry, and deployment on an existing VM.\n",
+        "stack": [
+          "node@20",
+          "ws",
+          "better-sqlite3"
+        ],
+        "repo_layout": "project-root/\n\u251c\u2500 package.json\n\u251c\u2500 README.md\n\u251c\u2500 LICENSE\n\u251c\u2500 src/\n\u2502  \u251c\u2500 server.js            # http_server module entry point\n\u2502  \u251c\u2500 utils.js             # utils module\n\u2502  \u251c\u2500 game_core.js         # game_core module\n\u2502  \u251c\u2500 bot.js               # bot module\n\u2502  \u251c\u2500 persistence.js       # persistence module\n\u2502  \u251c\u2500 rate_limiter.js      # rate_limiter module\n\u2502  \u2514\u2500 lobby.js             # lobby module\n\u2514\u2500 public/\n   \u251c\u2500 index.html\n   \u251c\u2500 style.css\n   \u2514\u2500 app.js                # client module\n",
+        "modules": [
+          {
+            "name": "utils",
+            "path": "src/utils.js",
+            "purpose": "Provide shared helper functions: random join\u2011code generator, deep copy, timer utilities, and simple validation helpers.",
+            "depends_on": [],
+            "contract": "Exports:\n- `generateJoinCode(length = 6): string` \u2013 returns an alphanumeric code using an unambiguous alphabet (A\u2011Z, 2\u20119) with cryptographic randomness.\n- `deepCopy<T>(obj: T): T` \u2013 returns a deep clone of plain objects/arrays.\n- `setTimeoutPromise(ms): Promise<void>` \u2013 resolves after ms.\n- `isValidName(name: string): boolean` \u2013 non\u2011empty trimmed string.\nOwned files: src/utils.js.\nTests: src/utils.test.js using Node's built\u2011in test runner, asserting code length/entropy and deepCopy correctness."
+          },
+          {
+            "name": "game_core",
+            "path": "src/game_core.js",
+            "purpose": "Pure game logic for Tic\u2011Tac\u2011Toe and Connect Four: board models, move validation, turn order, win/draw detection, and move list tracking.",
+            "depends_on": [
+              "utils"
+            ],
+            "contract": "Exports two classes:\n- `TicTacToe` with methods `constructor(playerX, playerO)`, `makeMove(playerId, row, col)`, `getState()`, `isGameOver()`, `winner()`, `moveList`.\n- `ConnectFour` with similar API but `makeMove(playerId, column)` and internal gravity handling.\nBoth classes throw on illegal moves and expose a serializable state object.\nOwned files: src/game_core.js.\nTests: src/game_core.test.js covering win, draw, illegal move, and state after a sequence of moves."
+          },
+          {
+            "name": "bot",
+            "path": "src/bot.js",
+            "purpose": "Server\u2011side AI offering easy, medium, and hard difficulty levels for both games.",
+            "depends_on": [
+              "game_core",
+              "utils"
+            ],
+            "contract": "Exports function `createBot(gameInstance, difficulty): Bot` where Bot has method `nextMove(): Promise<Move>` returning a legal move object.\nDifficulty strings: \"easy\", \"medium\", \"hard\".\nImplementation uses random for easy, shallow minimax for medium, full minimax (with alpha\u2011beta for Connect Four) for hard.\nOwned files: src/bot.js.\nTests: src/bot.test.js verifying that moves returned are legal and that hard bot never loses on a forced win scenario for Tic\u2011Tac\u2011Toe."
+          },
+          {
+            "name": "persistence",
+            "path": "src/persistence.js",
+            "purpose": "SQLite data\u2011access layer storing finished match records permanently.",
+            "depends_on": [],
+            "contract": "Exports functions:\n- `init(dbPath: string): void` \u2013 opens/creates DB and runs schema migration.\n- `saveMatch(record: MatchRecord): void` \u2013 inserts a row with fields: id, game_type, player1, player2, bot, difficulty, winner, moves_json, started_at, ended_at.\n- `getAllMatches(): MatchRecord[]` \u2013 returns all rows for admin tooling.\nOwned files: src/persistence.js.\nTests: src/persistence.test.js using an in\u2011memory SQLite DB to verify schema creation and record insertion."
+          },
+          {
+            "name": "rate_limiter",
+            "path": "src/rate_limiter.js",
+            "purpose": "In\u2011memory protection against abusive connections, message bursts, and join\u2011code guessing.",
+            "depends_on": [],
+            "contract": "Exports class `RateLimiter` with methods:\n- `trackConnection(ip): boolean` \u2013 returns true if allowed, false if connection limit exceeded.\n- `trackMessage(ip): boolean` \u2013 returns true if message rate within limit.\n- `trackJoinAttempt(ip): boolean` \u2013 returns true if join\u2011code attempts within limit.\nLimits are configurable constants inside the module.\nOwned files: src/rate_limiter.js.\nTests: src/rate_limiter.test.js simulating rapid calls and asserting throttling behavior."
+          },
+          {
+            "name": "lobby",
+            "path": "src/lobby.js",
+            "purpose": "Manage active games, player/spectator sessions, join\u2011code handling, reconnection grace, and idle cleanup.",
+            "depends_on": [
+              "game_core",
+              "bot",
+              "persistence",
+              "utils"
+            ],
+            "contract": "Exports class `Lobby` with methods:\n- `createGame(type: 'ttt'|'c4', hostSocket, playerName, botDifficulty?): string` \u2013 returns join code.\n- `joinGame(code, socket, playerName): void` \u2013 adds second player or spectator.\n- `handleMessage(socket, msg): void` \u2013 validates intent, forwards to appropriate game instance.\n- `cleanupTask(): void` \u2013 runs periodically to purge idle games.\nInternally stores a map of code \u2192 GameSession objects containing game instance, player sockets, spectator set, timers.\nOwned files: src/lobby.js.\nTests: src/lobby.test.js using mock sockets to verify code generation, player join, spectator limits, and graceful disconnect handling."
+          },
+          {
+            "name": "http_server",
+            "path": "src/server.js",
+            "purpose": "Entry point: HTTP server for static assets, `/health` endpoint, WebSocket upgrade, integration of rate limiting and lobby routing.",
+            "depends_on": [
+              "lobby",
+              "rate_limiter",
+              "utils"
+            ],
+            "contract": "When executed, starts listening on `process.env.PORT || 3000`. Serves files from `public/`. Handles GET `/health` returning JSON `{status:\"ok\"}`. Upgrades `/ws` to WebSocket, creates a per\u2011connection wrapper that registers with RateLimiter and passes messages to Lobby. Graceful shutdown on SIGINT.\nOwned files: src/server.js.\nTests: none required for build; manual health check via curl is documented."
+          },
+          {
+            "name": "client",
+            "path": "public/",
+            "purpose": "Vanilla HTML/CSS/JS UI for lobby, game board, spectator view, bot difficulty selection, and theme handling.",
+            "depends_on": [
+              "utils"
+            ],
+            "contract": "Files:\n- `index.html` \u2013 loads `style.css` and `app.js`.\n- `style.css` \u2013 defines light and dark palettes using `prefers-color-scheme` media queries.\n- `app.js` \u2013 implements UI state machine, WebSocket protocol handling (JSON messages with `type`), renders boards, shows spectator count, and provides controls for creating/joining games and selecting bot difficulty.\nNo external resources; all text is hard\u2011coded English.\nTests: none automated; manual checklist in README."
+          }
+        ],
+        "tasks": [
+          {
+            "id": "T1",
+            "title": "Implement utils module",
+            "module": "utils",
+            "prompt": "Create src/utils.js implementing the contract: generateJoinCode, deepCopy, setTimeoutPromise, isValidName. Add src/utils.test.js with Node test runner verifying code length, character set, and deep copy behavior.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [],
+            "acceptance": [
+              "utils.js exports the four functions with correct signatures.",
+              "generateJoinCode(6) returns a 6\u2011character string using only A\u2011Z and 2\u20119.",
+              "deepCopy produces a deep equal but not same reference object.",
+              "All tests in utils.test.js pass via `npm test`."
+            ]
+          },
+          {
+            "id": "T2",
+            "title": "Implement game_core module",
+            "module": "game_core",
+            "prompt": "Create src/game_core.js defining TicTacToe and ConnectFour classes per contract. Use utils for deepCopy where needed. Add src/game_core.test.js covering win, draw, illegal move, and move list correctness for both games.",
+            "tier": "deep",
+            "effort": "medium",
+            "depends_on": [
+              "T1"
+            ],
+            "acceptance": [
+              "Both classes expose the documented methods and throw on illegal moves.",
+              "Win detection works for all possible winning lines in TicTacToe.",
+              "ConnectFour correctly applies gravity and detects four\u2011in\u2011a\u2011row horizontally, vertically, and diagonally.",
+              "All tests in game_core.test.js pass."
+            ]
+          },
+          {
+            "id": "T3",
+            "title": "Implement bot module",
+            "module": "bot",
+            "prompt": "Create src/bot.js exporting createBot per contract. Implement easy (random legal move), medium (one\u2011ply lookahead with simple scoring), and hard (minimax; full depth for TicTacToe, depth\u2011limited with alpha\u2011beta for ConnectFour). Use game_core and utils. Add src/bot.test.js verifying that bot moves are legal and that hard bot never loses a forced win in TicTacToe.",
+            "tier": "deep",
+            "effort": "medium",
+            "depends_on": [
+              "T1",
+              "T2"
+            ],
+            "acceptance": [
+              "createBot returns an object with async nextMove() that resolves to a legal move.",
+              "Easy bot moves are within the set of legal moves.",
+              "Hard bot passes the forced\u2011win test for TicTacToe (no losing move when a win is available).",
+              "All bot tests pass."
+            ]
+          },
+          {
+            "id": "T4",
+            "title": "Implement persistence module",
+            "module": "persistence",
+            "prompt": "Create src/persistence.js with init, saveMatch, getAllMatches per contract. Use better-sqlite3, create a table `matches` with columns matching the MatchRecord fields. Add src/persistence.test.js using an in\u2011memory SQLite DB to verify schema creation and record insertion.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [],
+            "acceptance": [
+              "init creates the `matches` table if missing.",
+              "saveMatch inserts a row with correct data types.",
+              "getAllMatches returns an array containing inserted records.",
+              "All persistence tests pass."
+            ]
+          },
+          {
+            "id": "T5",
+            "title": "Implement rate_limiter module",
+            "module": "rate_limiter",
+            "prompt": "Create src/rate_limiter.js exporting RateLimiter class with trackConnection, trackMessage, trackJoinAttempt per contract. Use simple token\u2011bucket counters with configurable limits (e.g., max 5 connections per IP, 20 msgs/sec, 10 join attempts/min). Add src/rate_limiter.test.js simulating rapid calls and asserting false returns when limits exceeded.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [],
+            "acceptance": [
+              "RateLimiter enforces the three limits as defined.",
+              "trackMessage returns false after exceeding message rate.",
+              "All rate limiter tests pass."
+            ]
+          },
+          {
+            "id": "T6",
+            "title": "Implement lobby module",
+            "module": "lobby",
+            "prompt": "Create src/lobby.js implementing Lobby class per contract. Use utils for code generation, game_core for game instances, bot for bot opponents, persistence for saving finished matches, and internal timers for 60\u202fs reconnection grace and 10\u202fmin idle cleanup. Add src/lobby.test.js with mock WebSocket objects to verify game creation, player join, spectator join, and graceful disconnect handling.",
+            "tier": "deep",
+            "effort": "medium",
+            "depends_on": [
+              "T1",
+              "T2",
+              "T3",
+              "T4"
+            ],
+            "acceptance": [
+              "createGame returns a 6\u2011character join code and stores a GameSession.",
+              "Second player can join the same code and receives game updates.",
+              "Additional connections become spectators and cannot send move intents.",
+              "If a player disconnects, they can reconnect within 60\u202fs and retain their role.",
+              "Idle games with no sockets are removed after 10\u202fmin.",
+              "All lobby tests pass."
+            ]
+          },
+          {
+            "id": "T7",
+            "title": "Implement HTTP & WebSocket server",
+            "module": "http_server",
+            "prompt": "Create src/server.js that starts an HTTP server on PORT (default 3000), serves static files from `public/`, responds to GET `/health` with JSON `{status:\"ok\"}`, upgrades `/ws` to WebSocket, creates a RateLimiter instance, and forwards each socket to Lobby.handleMessage. Register SIGINT for graceful shutdown.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [
+              "T5",
+              "T6"
+            ],
+            "acceptance": [
+              "Running `npm start` starts a server listening on the configured port.",
+              "GET /health returns 200 and JSON `{status:\"ok\"}`.",
+              "WebSocket connections are accepted at ws://host:port/ws and messages are routed to Lobby without errors.",
+              "Static files from public/ are served correctly."
+            ]
+          },
+          {
+            "id": "T8",
+            "title": "Create client UI",
+            "module": "client",
+            "prompt": "Add files under public/: index.html, style.css, app.js. Implement UI for creating/joining games, selecting game type and bot difficulty, displaying the board for both games, showing spectator count, and handling WebSocket JSON protocol. Use CSS media queries to provide light and dark palettes respecting `prefers-color-scheme`. All text is hard\u2011coded English. No external resources.",
+            "tier": "standard",
+            "effort": "medium",
+            "depends_on": [
+              "T1"
+            ],
+            "acceptance": [
+              "Opening http://host:3000 loads the page with correct layout in both light and dark modes.",
+              "User can create a TicTacToe game with a bot, receive a join code, and see the board update after each move.",
+              "Spectator count updates when a second browser joins the same code.",
+              "All UI controls work without console errors."
+            ]
+          },
+          {
+            "id": "T9",
+            "title": "Write core automated tests",
+            "module": "game_core",
+            "prompt": "Expand src/game_core.test.js (or add additional test files) to achieve 100% branch coverage for win/draw detection, move validation, and turn order for both games. Ensure tests run via `npm test` and all pass.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [
+              "T2"
+            ],
+            "acceptance": [
+              "Running `npm test` reports all core tests passing.",
+              "Coverage report (if generated) shows no uncovered branches in game_core.",
+              "No test failures."
+            ]
+          }
+        ],
+        "scaffold_commands": [
+          "npm init -y",
+          "npm install ws better-sqlite3",
+          "mkdir -p src public",
+          "npm set-script start \"node src/server.js\"",
+          "npm set-script test \"node --test\""
+        ],
+        "build_command": "npm start",
+        "test_command": "npm test",
+        "deploy": {
+          "target": "vm",
+          "install_commands": [
+            "apt-get update -y",
+            "apt-get install -y nodejs npm build-essential",
+            "npm ci"
+          ],
+          "start_command": "npm start",
+          "port": 3000,
+          "health_path": "/health",
+          "env": [
+            {
+              "name": "PORT",
+              "value": ""
+            },
+            {
+              "name": "DB_PATH",
+              "value": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "run_id": "c7213225e46a",
+      "stage": "plan",
+      "tier": "local_reason",
+      "model": "gpt-oss-120b",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 111.02,
+      "input_tokens": 3356,
+      "output_tokens": 4461,
+      "structured": "json_object",
+      "cost": 0.0,
+      "tasks": 12,
+      "modules": 8,
+      "deploy_target": "none",
+      "deploy_target_match": false,
+      "task_count_delta": 4,
+      "scaffold_forbidden": false,
+      "has_test_command": true,
+      "plan_chars": 12888,
+      "output": {
+        "architecture": "The service consists of an Express application that receives HTTP requests, validates input, and interacts with a SQLite database stored in a single file. Requests flow: a client calls POST /shorten \u2192 the router validates the URL, generates a unique 7\u2011character base62 code via the utils module, stores the mapping in the db module, and returns the short URL. A GET /:code request looks up the code in the db module and issues a 302 redirect or a 404 JSON error. All routes pass through a rate\u2011limiting middleware (express-rate-limit) configured per client IP (60 requests per minute) and respect the TRUST_PROXY setting from the config module. The app factory (app module) wires middleware (JSON body parser, trust\u2011proxy, rate limiter) and the router. The server module starts the app on the PORT env var (default 3000). The Dockerfile builds the Node LTS Alpine image, installs production dependencies, creates a non\u2011root user, declares VOLUME /data, EXPOSE 3000, and runs the server entry point. No telemetry, no external calls, MIT licensed, all decisions from the brief are hard constraints.",
+        "stack": [
+          "node",
+          "express",
+          "better-sqlite3",
+          "express-rate-limit",
+          "node:test",
+          "supertest"
+        ],
+        "repo_layout": "project-root/\n\u251c\u2500 .dockerignore\n\u251c\u2500 Dockerfile\n\u251c\u2500 docker-compose.yml\n\u251c\u2500 LICENSE\n\u251c\u2500 README.md\n\u251c\u2500 package.json\n\u251c\u2500 src/\n\u2502  \u251c\u2500 app.js            # Express app factory\n\u2502  \u251c\u2500 config.js         # Environment configuration\n\u2502  \u251c\u2500 db.js             # SQLite wrapper\n\u2502  \u251c\u2500 router.js         # Route definitions\n\u2502  \u251c\u2500 rateLimiter.js    # Rate\u2011limit middleware\n\u2502  \u251c\u2500 server.js         # HTTP server entry point\n\u2502  \u2514\u2500 utils.js          # Code generation utilities\n\u2514\u2500 test/\n   \u2514\u2500 shortener.test.js # Test suite",
+        "modules": [
+          {
+            "name": "config",
+            "path": "src/config.js",
+            "purpose": "Read environment variables, provide defaults, and expose a typed configuration object used by all other modules.",
+            "depends_on": [],
+            "contract": "Exports a constant `config` with properties: PORT (number, default 3000), DB_PATH (string, default '/data/shortener.db'), TRUST_PROXY (string|boolean|number, default false), BASE_URL (string|undefined). All values are parsed once at module load."
+          },
+          {
+            "name": "db",
+            "path": "src/db.js",
+            "purpose": "Initialize the SQLite database, ensure WAL mode, create the `links` table with a UNIQUE `code` column, and provide CRUD helpers.",
+            "depends_on": [
+              "config"
+            ],
+            "contract": "Exports three async functions:\n- `initDb()`: opens the DB file, sets WAL, creates schema if missing, and returns the database handle.\n- `insertLink(code: string, url: string)`: inserts a new row; throws on UNIQUE violation.\n- `getLink(code: string)`: returns the original URL string or null if not found."
+          },
+          {
+            "name": "utils",
+            "path": "src/utils.js",
+            "purpose": "Generate random 7\u2011character base62 codes and handle collision retries.",
+            "depends_on": [],
+            "contract": "Exports a single async function `generateUniqueCode(db)`. It uses `crypto.randomInt` to build a 7\u2011char string from the base62 alphabet, checks uniqueness via `db.getLink`, retries up to 5 times, and finally returns a unique code or throws an Error after exhausting retries."
+          },
+          {
+            "name": "rateLimiter",
+            "path": "src/rateLimiter.js",
+            "purpose": "Provide an Express middleware that limits each client IP to 60 requests per minute and returns 429 with a Retry\u2011After header on excess.",
+            "depends_on": [
+              "config"
+            ],
+            "contract": "Exports a constant `rateLimiter` which is an instance of `express-rate-limit` configured with a window of 60\u202fseconds, max 60, standard rate\u2011limit headers, and a JSON error body `{ error: 'Too many requests' }`."
+          },
+          {
+            "name": "router",
+            "path": "src/router.js",
+            "purpose": "Define all HTTP endpoints (POST /shorten, GET /:code, GET /healthz) with validation, error handling, and interaction with db and utils.",
+            "depends_on": [
+              "db",
+              "utils",
+              "rateLimiter",
+              "config"
+            ],
+            "contract": "Exports an Express `Router` instance with three routes:\n- `POST /shorten`: validates JSON body `{url}`, checks scheme and length, generates a unique code via `utils.generateUniqueCode`, stores it with `db.insertLink`, and responds 201 with `{code, shortUrl, url}`.\n- `GET /:code`: validates `code` format, looks up with `db.getLink`, redirects 302 or returns 404 JSON `{error:'Not found'}`.\n- `GET /healthz`: always returns 200 JSON `{status:'ok'}`.\nAll routes use the shared `rateLimiter` middleware."
+          },
+          {
+            "name": "app",
+            "path": "src/app.js",
+            "purpose": "Create the Express application, wire middleware (JSON parser, trust\u2011proxy, rate limiter) and mount the router.",
+            "depends_on": [
+              "router",
+              "config",
+              "rateLimiter"
+            ],
+            "contract": "Exports a function `createApp()` that returns an Express `app` instance ready to be listened on. The app sets `trust proxy` based on `config.TRUST_PROXY`, uses `express.json()`, applies the global `rateLimiter`, and mounts the router at `/`."
+          },
+          {
+            "name": "server",
+            "path": "src/server.js",
+            "purpose": "Start the HTTP server using the app factory and listen on the configured port.",
+            "depends_on": [
+              "app",
+              "config"
+            ],
+            "contract": "When executed (`node src/server.js`), it calls `createApp()`, then `app.listen(config.PORT, () => console.log(...))`. No exported symbols are required."
+          },
+          {
+            "name": "tests",
+            "path": "test/shortener.test.js",
+            "purpose": "Automated test suite covering core behaviour using Node's built\u2011in test runner and supertest.",
+            "depends_on": [
+              "app",
+              "db"
+            ],
+            "contract": "Exports nothing; the file is executed by `npm test`. It contains tests for:\n- Successful shortening returns 201 and a 7\u2011char base62 code.\n- Redirect works for a known code.\n- Unknown code yields 404 JSON.\n- Invalid URL payload yields 400 JSON.\n- 61st request within a minute returns 429 with Retry\u2011After header.\nAll tests use an in\u2011memory SQLite database (by setting `process.env.DB_PATH=':memory:'`)."
+          }
+        ],
+        "tasks": [
+          {
+            "id": "cfg_init",
+            "title": "Create configuration module",
+            "module": "config",
+            "prompt": "Implement src/config.js to read PORT, DB_PATH, TRUST_PROXY, BASE_URL from environment variables with the defaults specified in the brief. Export a frozen `config` object.",
+            "tier": "standard",
+            "depends_on": [],
+            "acceptance": [
+              "Running `node -e \"require('./src/config').config\"` returns an object with correct default values when no env vars are set.",
+              "Setting each env var overrides the corresponding property."
+            ]
+          },
+          {
+            "id": "db_init",
+            "title": "Implement SQLite wrapper",
+            "module": "db",
+            "prompt": "Write src/db.js to open the SQLite file at config.DB_PATH, enable WAL mode, create the `links` table with columns (code TEXT PRIMARY KEY, url TEXT NOT NULL, created_at INTEGER NOT NULL) if it does not exist, and export initDb, insertLink, getLink as described in the contract.",
+            "tier": "deep",
+            "depends_on": [
+              "cfg_init"
+            ],
+            "acceptance": [
+              "Calling initDb() creates /data/shortener.db (or the path set) and the schema with a UNIQUE constraint on code.",
+              "insertLink('abc1234','https://example.com') stores the row and getLink('abc1234') returns the original URL."
+            ]
+          },
+          {
+            "id": "utils_codegen",
+            "title": "Add code generation utility",
+            "module": "utils",
+            "prompt": "Implement src/utils.js with a function generateUniqueCode(db) that creates a random 7\u2011character base62 string using crypto.randomInt, checks uniqueness via db.getLink, retries up to 5 times, and throws on failure.",
+            "tier": "standard",
+            "depends_on": [
+              "db_init"
+            ],
+            "acceptance": [
+              "generateUniqueCode returns a string matching /^[0-9A-Za-z]{7}$/.",
+              "When the DB already contains a generated code, the function retries and eventually returns a different code."
+            ]
+          },
+          {
+            "id": "rateLimiter_setup",
+            "title": "Configure rate limiting middleware",
+            "module": "rateLimiter",
+            "prompt": "Create src/rateLimiter.js that exports an Express rate\u2011limit middleware limiting each IP to 60 requests per minute, returning JSON `{error:'Too many requests'}` with status 429 and a Retry\u2011After header.",
+            "tier": "standard",
+            "depends_on": [
+              "cfg_init"
+            ],
+            "acceptance": [
+              "After 60 rapid requests from the same IP, the 61st response has status 429 and includes a Retry\u2011After header.",
+              "The middleware respects config.TRUST_PROXY when Express is configured."
+            ]
+          },
+          {
+            "id": "router_setup",
+            "title": "Implement API routes",
+            "module": "router",
+            "prompt": "Write src/router.js defining the three routes (POST /shorten, GET /:code, GET /healthz) with validation, error handling, and interaction with db and utils as per the contract. Use the rateLimiter middleware for all routes.",
+            "tier": "deep",
+            "depends_on": [
+              "db_init",
+              "utils_codegen",
+              "rateLimiter_setup",
+              "cfg_init"
+            ],
+            "acceptance": [
+              "POST /shorten with a valid JSON body returns 201 and a JSON payload containing a 7\u2011char code and correct shortUrl.",
+              "GET /:code for an existing code redirects (302) to the original URL.",
+              "GET /:code for an unknown or malformed code returns 404 with JSON `{error:'Not found'}`.",
+              "GET /healthz always returns 200 with `{status:'ok'}`."
+            ]
+          },
+          {
+            "id": "app_factory",
+            "title": "Create Express app factory",
+            "module": "app",
+            "prompt": "Implement src/app.js exporting a function createApp() that builds an Express app, sets trust proxy from config.TRUST_PROXY, uses express.json(), applies the global rateLimiter, and mounts the router at '/'.",
+            "tier": "standard",
+            "depends_on": [
+              "router_setup",
+              "rateLimiter_setup",
+              "cfg_init"
+            ],
+            "acceptance": [
+              "createApp() returns an Express instance that can be listened on without throwing.",
+              "When the app receives a request, the trust\u2011proxy setting matches config.TRUST_PROXY."
+            ]
+          },
+          {
+            "id": "server_entry",
+            "title": "Add server start script",
+            "module": "server",
+            "prompt": "Write src/server.js that imports createApp from app, calls initDb(), then starts the server on config.PORT, logging the listening address.",
+            "tier": "light",
+            "depends_on": [
+              "app_factory",
+              "db_init"
+            ],
+            "acceptance": [
+              "Running `node src/server.js` starts a process listening on the configured port and prints a startup message.",
+              "The process exits with an error if the DB cannot be initialized."
+            ]
+          },
+          {
+            "id": "dockerfile_create",
+            "title": "Write Dockerfile",
+            "module": "none",
+            "prompt": "Create a Dockerfile that uses node:lts-alpine, copies package.json and src/, runs npm ci --only=production, creates a non\u2011root user `node`, sets WORKDIR /app, EXPOSE 3000, declares VOLUME /data, and sets the default CMD to `node src/server.js`. Ensure better\u2011sqlite3 native build works (install build\u2011essential if needed).",
+            "tier": "light",
+            "depends_on": [
+              "server_entry",
+              "cfg_init",
+              "db_init"
+            ],
+            "acceptance": [
+              "docker build . -t pipez succeeds without errors.",
+              "docker run -p 3000:3000 -v pipez-data:/data pipez returns HTTP 200 on /healthz."
+            ]
+          },
+          {
+            "id": "readme_write",
+            "title": "Create README.md",
+            "module": "none",
+            "prompt": "Write a README that documents the API, required environment variables, Docker build/run commands, docker\u2011compose example, and notes about TRUST_PROXY and data growth.",
+            "tier": "light",
+            "depends_on": [
+              "dockerfile_create",
+              "cfg_init",
+              "router_setup"
+            ],
+            "acceptance": [
+              "README contains sections for Usage, Environment, Docker, API Endpoints, and License.",
+              "The Docker command examples match the built image name."
+            ]
+          },
+          {
+            "id": "test_suite",
+            "title": "Implement test suite",
+            "module": "tests",
+            "prompt": "Create test/shortener.test.js using node:test and supertest. Spin up the app with an in\u2011memory DB (set process.env.DB_PATH=':memory:') and run the five core tests described in the contract.",
+            "tier": "standard",
+            "depends_on": [
+              "app_factory",
+              "db_init",
+              "utils_codegen",
+              "router_setup"
+            ],
+            "acceptance": [
+              "Running `npm test` executes all tests and exits with code 0.",
+              "Each test case passes: shortening, redirect, 404, 400, and rate\u2011limit behavior."
+            ]
+          },
+          {
+            "id": "license_add",
+            "title": "Add MIT LICENSE",
+            "module": "none",
+            "prompt": "Create a LICENSE file containing the standard MIT license with placeholder copyright holder 'pipez contributors' and the current year.",
+            "tier": "light",
+            "depends_on": [],
+            "acceptance": [
+              "LICENSE file exists and matches the MIT template."
+            ]
+          },
+          {
+            "id": "dockerignore_create",
+            "title": "Create .dockerignore",
+            "module": "none",
+            "prompt": "Add a .dockerignore file that excludes node_modules, npm-debug.log, Dockerfile, .git, and any local data files.",
+            "tier": "light",
+            "depends_on": [],
+            "acceptance": [
+              ".dockerignore exists and contains entries for node_modules and .git."
+            ]
+          }
+        ],
+        "scaffold_commands": [
+          "npm init -y",
+          "npm install express better-sqlite3 express-rate-limit",
+          "npm install --save-dev supertest"
+        ],
+        "build_command": "npm install",
+        "test_command": "npm test",
+        "deploy": {
+          "target": "none",
+          "install_commands": [],
+          "start_command": "",
+          "port": 0,
+          "health_path": "",
+          "env": []
+        }
+      }
+    },
+    {
+      "run_id": "60cd5166f16a",
+      "stage": "plan",
+      "tier": "local_reason",
+      "model": "gpt-oss-120b",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 138.7,
+      "input_tokens": 3487,
+      "output_tokens": 6009,
+      "structured": "json_object",
+      "cost": 0.0,
+      "tasks": 12,
+      "modules": 5,
+      "deploy_target": "vm",
+      "deploy_target_match": true,
+      "task_count_delta": 4,
+      "scaffold_forbidden": false,
+      "has_test_command": true,
+      "plan_chars": 17279,
+      "output": {
+        "architecture": "The system consists of four runtime components: **Config**, **Database**, **Highlight**, and **Web**. Config reads environment variables (PIPEZ_HOST, PIPEZ_PORT, PIPEZ_DB_PATH) at import and provides a Settings dataclass. Database opens a SQLite connection in WAL mode, creates the `pastes` table on startup, and offers CRUD functions. It also runs a background asyncio task every 60\u202fseconds (and once at startup) that deletes rows whose `expires_at` is in the past. Highlight wraps Pygments: `highlight_code` selects a lexer (auto\u2011detect or explicit), falls back to plain text, and returns HTML with line numbers and CSS\u2011class styling; `generate_css` writes two static style sheets (light \u2018default\u2019, dark \u2018monokai\u2019) scoped for `prefers\u2011color\u2011scheme`. Web builds a FastAPI app, serves three HTML routes (GET `/` form, POST `/` create, GET `/p/{id}` view) using Jinja2 templates and Pico CSS from the static directory. All user content is escaped; expired or unknown IDs return a custom 404 page. The request flow is: request \u2192 Web \u2192 Config (for settings) \u2192 Database (store/read) \u2192 Highlight (format) \u2192 Jinja2 \u2192 response. A systemd unit runs `uvicorn pipez.main:app` from a venv, binding to the host/port from the env file. Logging goes to stdout/stderr and is captured by journald. All decisions from the brief (FastAPI, SQLite, Pico CSS, server\u2011rendered HTML, MIT license, no auth, LAN\u2011only, systemd service, expiry handling, auto light/dark theme, env\u2011file config) are honoured explicitly in the component design.",
+        "stack": [
+          "Python",
+          "FastAPI",
+          "SQLite",
+          "Jinja2",
+          "Pygments",
+          "Pico CSS",
+          "uvicorn",
+          "pytest"
+        ],
+        "repo_layout": "```text\npipez/\n\u251c\u2500\u2500 main.py            # FastAPI app, routes, startup\n\u251c\u2500\u2500 config.py          # Settings dataclass, env loading\n\u251c\u2500\u2500 db.py              # SQLite wrapper, schema, CRUD, purge task\n\u251c\u2500\u2500 highlight.py       # Pygments integration, CSS generation\n\u251c\u2500\u2500 templates/\n\u2502   \u251c\u2500\u2500 base.html\n\u2502   \u251c\u2500\u2500 index.html\n\u2502   \u251c\u2500\u2500 view.html\n\u2502   \u2514\u2500\u2500 404.html\n\u251c\u2500\u2500 static/\n\u2502   \u251c\u2500\u2500 pico.css      # vendored Pico CSS\n\u2502   \u251c\u2500\u2500 pygments_light.css\n\u2502   \u2514\u2500\u2500 pygments_dark.css\n\u251c\u2500\u2500 tests/\n\u2502   \u251c\u2500\u2500 conftest.py   # fixtures (temp DB, client)\n\u2502   \u2514\u2500\u2500 test_app.py   # pytest suite\n\u251c\u2500\u2500 deploy/\n\u2502   \u2514\u2500\u2500 pipez.service # systemd unit file\n\u251c\u2500\u2500 pyproject.toml\n\u251c\u2500\u2500 requirements.txt\n\u251c\u2500\u2500 README.md\n\u251c\u2500\u2500 LICENSE\n\u2514\u2500\u2500 pipez.env.example\n```",
+        "modules": [
+          {
+            "name": "config",
+            "path": "pipez/config.py",
+            "purpose": "Read environment variables (PIPEZ_HOST, PIPEZ_PORT, PIPEZ_DB_PATH) with defaults and expose a Settings dataclass used by all other modules.",
+            "depends_on": [],
+            "contract": "Exports `Settings` dataclass with fields `host: str`, `port: int`, `db_path: str`. On import, reads `os.environ` and applies defaults (`0.0.0.0`, `8000`, `./pipez.db`). No external dependencies. Tested by unit test that patches `os.environ` and asserts Settings values."
+          },
+          {
+            "name": "db",
+            "path": "pipez/db.py",
+            "purpose": "SQLite wrapper handling schema creation, paste CRUD, and background expiry purging.",
+            "depends_on": [
+              "config"
+            ],
+            "contract": "Class `DB` with methods:\n- `init_schema() -> None` creates table `pastes(id TEXT PRIMARY KEY, content TEXT, language TEXT, created_at INTEGER, expires_at INTEGER NULL)` and enables WAL.\n- `create_paste(content: str, language: str, expires_at: Optional[int]) -> str` generates a URL\u2011safe 8\u2011char id (retry on collision), validates size (\u2264512\u202fKiB, non\u2011empty), inserts row, returns id.\n- `get_paste(paste_id: str) -> Optional[dict]` returns dict with keys `id, content, language, created_at, expires_at` if exists and not expired, else `None`.\n- `delete_expired() -> int` removes rows where `expires_at` \u2264 now and returns count.\n- `register_purge_task(app: FastAPI) -> None` schedules `delete_expired` every 60\u202fs and runs once at startup.\nAll queries are parameterized. Tested via pytest with a temporary in\u2011memory DB covering schema init, insert, read, expiry logic, and collision handling."
+          },
+          {
+            "name": "highlight",
+            "path": "pipez/highlight.py",
+            "purpose": "Wrap Pygments to produce HTML highlighted code and generate static CSS style sheets for light and dark themes.",
+            "depends_on": [],
+            "contract": "Exports two functions:\n- `highlight_code(content: str, language: str) -> str` selects lexer: if `language == 'auto'` use `guess_lexer`; if explicit, get lexer by name, fallback to `TextLexer`. Returns HTML from `HtmlFormatter` with `linenos=True`, `noclasses=False`, `cssclass='code'`.\n- `generate_css(output_dir: Path) -> None` writes `pygments_light.css` (style='default') and `pygments_dark.css` (style='monokai') scoped under `.light-theme` and `.dark-theme` selectors respectively, and includes a media query for `prefers-color-scheme: dark`.\nBoth functions are pure and have no side effects beyond file output. Tested by checking that generated HTML contains expected CSS class names and that CSS files are created with correct selectors."
+          },
+          {
+            "name": "web",
+            "path": "pipez/main.py",
+            "purpose": "FastAPI application: route definitions, template rendering, request validation, and startup registration of background purge task.",
+            "depends_on": [
+              "config",
+              "db",
+              "highlight"
+            ],
+            "contract": "Exports `app: FastAPI` with routes:\n- `GET /` \u2192 renders `index.html` with empty form, language options (auto + all Pygments lexer names), expiry options (10\u202fmin, 1\u202fh, 1\u202fday, never) defaulting to 1\u202fday.\n- `POST /` \u2192 validates `content` (non\u2011empty, \u2264512\u202fKiB), `language` (fallback to auto), `expiry` (maps to epoch seconds or NULL), calls `DB.create_paste`, redirects (303) to `/p/{id}`.\n- `GET /p/{id}` \u2192 calls `DB.get_paste`; if None returns 404 page; otherwise calls `highlight_code` and renders `view.html` with highlighted HTML, language, created/expiry timestamps.\nStartup event registers `DB.register_purge_task(app)`. Uses Jinja2 templates with auto\u2011escape. Tested via FastAPI TestClient covering all routes, validation errors, expiry handling, and HTML escaping."
+          },
+          {
+            "name": "tests",
+            "path": "tests",
+            "purpose": "Automated test suite exercising the full application behavior.",
+            "depends_on": [
+              "web",
+              "db",
+              "config",
+              "highlight"
+            ],
+            "contract": "Contains `conftest.py` providing a temporary SQLite DB path, a `DB` fixture, and a FastAPI `TestClient`. `test_app.py` includes tests for:\n- successful paste creation with each expiry option and subsequent view before expiry;\n- 404 response after simulated expiry (by inserting past expires_at);\n- never\u2011expiring paste persists;\n- unknown ID returns 404;\n- empty content and oversized content (>512\u202fKiB) return 4xx pages;\n- HTML escaping of script tags in content;\n- presence of Pygments CSS classes in rendered view.\nAll tests run with `pytest -q` and must pass."
+          }
+        ],
+        "tasks": [
+          {
+            "id": "cfg_load",
+            "title": "Implement Settings loader",
+            "module": "config",
+            "prompt": "Write `pipez/config.py` that defines a `Settings` dataclass with fields `host`, `port`, `db_path`. On import, read `os.environ` for `PIPEZ_HOST`, `PIPEZ_PORT`, `PIPEZ_DB_PATH`, applying defaults `0.0.0.0`, `8000`, `./pipez.db`. Ensure types are correct and values are stripped of whitespace.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [],
+            "acceptance": [
+              "Importing config.Settings yields host='0.0.0.0', port=8000, db_path='./pipez.db' when no env vars are set.",
+              "When env vars are set (e.g., PIPEZ_HOST=127.0.0.1), Settings reflects those values."
+            ]
+          },
+          {
+            "id": "db_init_schema",
+            "title": "Create SQLite schema and enable WAL",
+            "module": "db",
+            "prompt": "Implement `DB.init_schema()` in `pipez/db.py`. It must open a connection to the path from `config.Settings.db_path`, execute `PRAGMA journal_mode=WAL`, and create the `pastes` table if it does not exist with the columns specified in the brief. Use parameterized SQL and ensure the connection is stored for later use.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [
+              "cfg_load"
+            ],
+            "acceptance": [
+              "Calling DB.init_schema() creates a file at the configured path and the table `pastes` exists.",
+              "PRAGMA journal_mode returns 'wal'."
+            ]
+          },
+          {
+            "id": "db_create_paste",
+            "title": "Implement paste creation with id generation and validation",
+            "module": "db",
+            "prompt": "Add `DB.create_paste(content, language, expires_at)` to `pipez/db.py`. Enforce content size \u2264 512\u202fKiB and non\u2011empty; raise a ValueError for violations. Generate an 8\u2011character URL\u2011safe token via `secrets.token_urlsafe(6)` (\u22488 chars) and retry on PRIMARY KEY conflict up to 5 attempts, then raise RuntimeError. Insert the row with current UTC epoch seconds for `created_at` and the supplied `expires_at` (or NULL). Return the generated id.",
+            "tier": "deep",
+            "effort": "medium",
+            "depends_on": [
+              "db_init_schema"
+            ],
+            "acceptance": [
+              "Creating a paste with valid data returns an 8\u2011char id and stores the row.",
+              "Oversized content raises ValueError.",
+              "Empty content raises ValueError.",
+              "Collision handling retries and eventually succeeds or raises RuntimeError after 5 attempts."
+            ]
+          },
+          {
+            "id": "db_get_paste",
+            "title": "Implement safe paste retrieval with expiry check",
+            "module": "db",
+            "prompt": "Add `DB.get_paste(paste_id)` to `pipez/db.py`. Query the row by id using a parameterized SELECT. If no row, return None. If `expires_at` is not NULL and \u2264 current UTC epoch seconds, return None (do not delete here). Otherwise return a dict with keys `id, content, language, created_at, expires_at`.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [
+              "db_init_schema"
+            ],
+            "acceptance": [
+              "Retrieving an existing, non\u2011expired paste returns its data.",
+              "Retrieving a non\u2011existent id returns None.",
+              "Retrieving an expired paste returns None."
+            ]
+          },
+          {
+            "id": "db_purge_task",
+            "title": "Background task to delete expired pastes",
+            "module": "db",
+            "prompt": "Implement `DB.register_purge_task(app)` in `pipez/db.py`. On FastAPI startup, schedule an `asyncio.create_task` that runs `delete_expired()` every 60 seconds using `asyncio.sleep`. Also call `delete_expired()` once immediately. Ensure the task is cancelled on shutdown.",
+            "tier": "deep",
+            "effort": "medium",
+            "depends_on": [
+              "db_get_paste",
+              "db_create_paste"
+            ],
+            "acceptance": [
+              "When the FastAPI app starts, expired rows are removed immediately.",
+              "After startup, expired rows are removed at 60\u2011second intervals (can be simulated with a fast\u2011forward test)."
+            ]
+          },
+          {
+            "id": "highlight_format",
+            "title": "Implement code highlighting function",
+            "module": "highlight",
+            "prompt": "Write `highlight_code(content, language)` in `pipez/highlight.py`. If `language` is `'auto'`, use `pygments.lexers.guess_lexer`; otherwise obtain lexer via `get_lexer_by_name` (ignore case). On any exception, fall back to `TextLexer`. Use `HtmlFormatter(linenos=True, noclasses=False, cssclass='code')` to produce HTML. Return the HTML string.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [],
+            "acceptance": [
+              "Highlighting Python code with language='python' returns HTML containing `<span class=\"k\">` (keyword class).",
+              "Auto\u2011detect on unknown content returns plain text HTML without syntax classes.",
+              "The returned HTML includes line numbers."
+            ]
+          },
+          {
+            "id": "highlight_generate_css",
+            "title": "Generate light and dark Pygments CSS files",
+            "module": "highlight",
+            "prompt": "Implement `generate_css(output_dir)` in `pipez/highlight.py`. Write `pygments_light.css` using `HtmlFormatter(style='default')` and wrap the CSS in `.light-theme { ... }`. Write `pygments_dark.css` using `style='monokai'` and wrap in `.dark-theme { ... }`. Also create a combined file that applies `.dark-theme` inside `@media (prefers-color-scheme: dark) { .dark-theme { ... } }`. Ensure the files are written to the given directory.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [],
+            "acceptance": [
+              "Running generate_css on a temporary directory creates two files with non\u2011empty content.",
+              "The light CSS file contains the selector `.light-theme`.",
+              "The dark CSS file contains the selector `.dark-theme` and a media query for dark mode."
+            ]
+          },
+          {
+            "id": "web_routes_form",
+            "title": "GET / \u2013 render paste creation form",
+            "module": "web",
+            "prompt": "In `pipez/main.py`, add a FastAPI route `GET /` that renders `templates/index.html`. Pass to the template the list of language options: `'auto'` plus all lexer names from `pygments.lexers.get_all_lexers()` (use the first alias). Also pass expiry options mapping (10\u202fmin, 1\u202fh, 1\u202fday, never) with the default selected as 1\u202fday. Use Jinja2 `TemplateResponse` with the global `settings` for form action URL.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [
+              "cfg_load",
+              "highlight_generate_css"
+            ],
+            "acceptance": [
+              "GET / returns 200 and HTML containing a `<form>` with a `<textarea>` named `content`.",
+              "The language `<select>` includes an option with value `auto` selected by default.",
+              "The expiry `<select>` includes the four options and defaults to 1\u202fday."
+            ]
+          },
+          {
+            "id": "web_routes_create",
+            "title": "POST / \u2013 validate, store, and redirect",
+            "module": "web",
+            "prompt": "Add a FastAPI route `POST /` that reads form fields `content`, `language`, `expiry`. Validate that `content` is non\u2011empty and \u2264 512\u202fKiB; on failure return a 400 HTML page. Map `expiry` values (`10m`, `1h`, `1d`, `never`) to a UTC epoch seconds (`now + seconds`) or `None`. Call `DB.create_paste` with the data. On success, return a `RedirectResponse` to `/p/{id}` with status code 303.",
+            "tier": "deep",
+            "effort": "medium",
+            "depends_on": [
+              "db_create_paste",
+              "cfg_load"
+            ],
+            "acceptance": [
+              "Posting valid data returns 303 and Location header `/p/<8\u2011char-id>`.",
+              "Posting empty content returns 400 with an error page.",
+              "Posting >512\u202fKiB returns 400.",
+              "Expiry `never` stores NULL in the DB."
+            ]
+          },
+          {
+            "id": "web_routes_view",
+            "title": "GET /p/{id} \u2013 display highlighted paste",
+            "module": "web",
+            "prompt": "Add a FastAPI route `GET /p/{paste_id}`. Use `DB.get_paste`. If None, return a 404 HTML page. Otherwise, call `highlight_code` with stored `content` and `language` (use `'auto'` if language is empty). Render `templates/view.html` with highlighted HTML, language name, creation timestamp (ISO), and expiry timestamp or the word `never`. Include a link back to `/`.",
+            "tier": "standard",
+            "effort": "low",
+            "depends_on": [
+              "db_get_paste",
+              "highlight_format"
+            ],
+            "acceptance": [
+              "Viewing an existing paste returns 200 and HTML containing the highlighted code with line numbers.",
+              "The page shows the correct language and timestamps.",
+              "Requesting an unknown or expired id returns a custom 404 page."
+            ]
+          },
+          {
+            "id": "web_background_task_registration",
+            "title": "Register purge task on startup",
+            "module": "web",
+            "prompt": "In `pipez/main.py`, add a FastAPI `@app.on_event('startup')` handler that calls `DB.register_purge_task(app)`. Also add a `@app.on_event('shutdown')` handler that cancels the background task if needed.",
+            "tier": "light",
+            "effort": "low",
+            "depends_on": [
+              "db_purge_task"
+            ],
+            "acceptance": [
+              "When the FastAPI app starts in a test, the background task is scheduled (can be inspected via a flag).",
+              "On shutdown the task is cancelled without errors."
+            ]
+          },
+          {
+            "id": "tests_write",
+            "title": "Write pytest suite covering all functional requirements",
+            "module": "tests",
+            "prompt": "Create `tests/conftest.py` that provides a temporary SQLite file, a `DB` fixture that uses `pipez.db.DB` with that file, and a FastAPI `TestClient`. Then implement `tests/test_app.py` with tests for: successful creation/view for each expiry option, 404 after expiry (by manually setting `expires_at` in the DB), never\u2011expire behavior, unknown id 404, empty/oversize rejection, HTML escaping of `<script>` tags, and presence of Pygments CSS classes in the rendered view. Use the client to POST form data and follow redirects as needed.",
+            "tier": "standard",
+            "effort": "medium",
+            "depends_on": [
+              "web_routes_form",
+              "web_routes_create",
+              "web_routes_view",
+              "highlight_format",
+              "db_create_paste",
+              "db_get_paste"
+            ],
+            "acceptance": [
+              "Running `pytest -q` from the repo root passes all tests.",
+              "Coverage includes each route and expiry logic."
+            ]
+          }
+        ],
+        "scaffold_commands": [
+          "python -m venv .venv",
+          ". .venv/bin/activate",
+          "pip install -r requirements.txt"
+        ],
+        "build_command": "pip install -e .",
+        "test_command": "pytest -q",
+        "deploy": {
+          "target": "vm",
+          "install_commands": [
+            "apt-get update -y",
+            "apt-get install -y python3-venv python3-pip",
+            "mkdir -p /opt/pipez",
+            "tar -xzf pipez.tar.gz -C /opt/pipez",
+            "cd /opt/pipez",
+            "python3 -m venv .venv",
+            ". .venv/bin/activate",
+            "pip install -r requirements.txt"
+          ],
+          "start_command": "cd /opt/pipez && . .venv/bin/activate && uvicorn pipez.main:app --host $PIPEZ_HOST --port $PIPEZ_PORT",
+          "port": 8000,
+          "health_path": "/",
+          "env": [
+            {
+              "name": "PIPEZ_HOST",
+              "value": ""
+            },
+            {
+              "name": "PIPEZ_PORT",
+              "value": ""
+            },
+            {
+              "name": "PIPEZ_DB_PATH",
+              "value": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "run_id": "c6973d74ac0e",
+      "stage": "plan",
+      "tier": "local_reason",
+      "model": "gpt-oss-120b",
+      "ok": true,
+      "schema_valid": true,
+      "seconds": 262.55,
+      "input_tokens": 3292,
+      "output_tokens": 7455,
+      "structured": "json_object",
+      "cost": 0.0,
+      "tasks": 9,
+      "modules": 6,
+      "deploy_target": "vm",
+      "deploy_target_match": true,
+      "task_count_delta": 2,
+      "scaffold_forbidden": false,
+      "has_test_command": true,
+      "plan_chars": 17356,
+      "output": {
+        "architecture": "## Architecture Overview\n\n- **FastAPI Application** (`app/main.py`)\n  - Serves HTTP requests, renders Jinja2 templates, serves static assets.\n  - Uses a lightweight CSRF mitigation middleware that checks the `Origin`/`Host` header on all `POST` requests.\n- **Configuration** (`app/config.py`)\n  - Reads environment variables `PORT` (default\u202f8000) and `DB_PATH` (default `./data/pipez.db`).\n- **SQLite Storage** (`app/db.py`)\n  - Single\u2011file SQLite database with foreign\u2011key enforcement.\n  - Schema version table, automatic creation of `bills` and `payments` tables on startup.\n- **Domain Models** (`app/models.py`)\n  - `Bill`, `Payment` dataclasses and `Recurrence` enum describing the supported intervals.\n- **Recurrence Logic** (`app/recurrence.py`)\n  - Pure functions to compute the next due date for a bill and all occurrences of a bill within a given month.\n  - Handles month\u2011end clamping, leap years and year rollover as required.\n- **Money Utilities** (`app/money.py`)\n  - Stores amounts as integer cents.\n  - Formats cents to US\u2011style `$1,234.56` strings and parses them back.\n- **Templates & Static Assets** (`app/templates/`, `app/static/`)\n  - Server\u2011rendered HTML using Jinja2 with auto\u2011escaping.\n  - Class\u2011less CSS (Pico\u2011style) served locally, responsive on phones.\n- **Systemd Service** (`pipez.service`)\n  - Runs the app via `uvicorn` inside a virtualenv under an unprivileged user.\n  - Environment variables for port and DB path are supplied via `EnvironmentFile`.\n\n### Data Flow\n1. **Request** arrives on `0.0.0.0:<PORT>`.\n2. FastAPI routes (in `main.py`) invoke **business logic** (recurrence, money) and **data access** (via `db.py`).\n3. Results are passed to Jinja2 templates which render HTML.\n4. Responses are sent back to the client.\n\n### Key Decisions Honoured\n- **Language/Framework**: Python\u202f3 with FastAPI (as mandated).\n- **Storage**: SQLite file, configurable via env var.\n- **Auth**: No login; all state\u2011changing endpoints use `POST` and simple Origin/Host check.\n- **UI**: Server\u2011rendered HTML, class\u2011less CSS, no external assets.\n- **Deployment**: Systemd unit, runs as unprivileged user, configurable port and DB path.\n- **Currency**: USD only, amounts stored as integer cents, formatted with `$`.\n- **Recurrence**: All listed intervals with month\u2011end clamping logic.\n- **Retention**: Payment history never purged.\n- **License**: Proprietary, all rights reserved.\n- **Testing**: Core\u2011logic unit tests with pytest; UI tests omitted.\n- **Docs**: Single README with install, config, systemd setup, backup instructions.\n",
+        "stack": [
+          "Python 3.11",
+          "FastAPI",
+          "Uvicorn",
+          "Jinja2",
+          "SQLite",
+          "pytest",
+          "Pydantic",
+          "python-dotenv"
+        ],
+        "repo_layout": "- app/\n  - __init__.py\n  - config.py\n  - db.py\n  - models.py\n  - recurrence.py\n  - money.py\n  - main.py\n  - templates/\n    - base.html\n    - home.html\n    - bill_form.html\n    - payments.html\n  - static/\n    - style.css\n- tests/\n  - test_recurrence.py\n  - test_money.py\n  - test_mark_paid.py\n- requirements.txt\n- pipez.service\n- README.md\n- LICENSE",
+        "modules": [
+          {
+            "name": "config",
+            "path": "app/config.py",
+            "purpose": "Load environment variables with defaults and expose a Config dataclass.",
+            "depends_on": [],
+            "contract": "Exports:\n- `Config` dataclass with fields `port: int` and `db_path: str`.\n- `load_config() -> Config` reads `PORT` (default 8000) and `DB_PATH` (default './data/pipez.db') from the environment.\n- Constants `DEFAULT_PORT = 8000` and `DEFAULT_DB_PATH = './data/pipez.db'`.\nAll values are validated as integers/strings and the module has no side effects beyond reading env vars."
+          },
+          {
+            "name": "db",
+            "path": "app/db.py",
+            "purpose": "Provide a SQLite connection, initialise the schema, and expose helper functions.",
+            "depends_on": [
+              "config"
+            ],
+            "contract": "Exports:\n- `init_db() -> None` creates the database file (if missing), enables foreign keys, creates tables `bills`, `payments`, and a `schema_version` table, and inserts the current schema version.\n- `get_connection() -> sqlite3.Connection` returns a thread\u2011local connection to the configured DB path.\n- `execute(query: str, params: tuple = ()) -> sqlite3.Cursor` convenience wrapper.\nAll functions raise clear exceptions on failure."
+          },
+          {
+            "name": "models",
+            "path": "app/models.py",
+            "purpose": "Define domain data structures used throughout the app.",
+            "depends_on": [],
+            "contract": "Exports:\n- `Recurrence` Enum with members: ONE_TIME, WEEKLY, BIWEEKLY, MONTHLY, BIMONTHLY, QUARTERLY, SEMIANNUAL, YEARLY.\n- `Bill` dataclass with fields: `id: int`, `name: str`, `amount_cents: int`, `due_date: date`, `recurrence: Recurrence`, `notes: Optional[str]`, `is_active: bool`.\n- `Payment` dataclass with fields: `id: int`, `bill_id: int`, `due_date: date`, `paid_date: date`, `amount_cents: int`.\n- Pydantic models `BillCreate`, `BillUpdate`, `PaymentCreate` for request validation.\nNo I/O performed; pure data definitions."
+          },
+          {
+            "name": "recurrence",
+            "path": "app/recurrence.py",
+            "purpose": "Pure date\u2011calculation utilities for recurring bills.",
+            "depends_on": [
+              "models"
+            ],
+            "contract": "Exports:\n- `next_due_date(bill: Bill, from_date: date) -> date` returns the next due date after `from_date` according to `bill.recurrence`. Handles month\u2011end clamping, leap years, and one\u2011time bills (returns `None`).\n- `occurrences_in_month(bill: Bill, month: int, year: int) -> List[date]` returns all due dates of `bill` that fall within the specified month/year, respecting the same recurrence rules.\nBoth functions are deterministic and side\u2011effect free."
+          },
+          {
+            "name": "money",
+            "path": "app/money.py",
+            "purpose": "Utility functions for handling monetary values stored as integer cents.",
+            "depends_on": [],
+            "contract": "Exports:\n- `format_cents(cents: int) -> str` returns a US\u2011style string like `$1,234.56` (handles negative values).\n- `parse_amount(s: str) -> int` parses a string formatted by `format_cents` back to integer cents, raising `ValueError` on invalid input.\nAll functions are pure."
+          },
+          {
+            "name": "main",
+            "path": "app/main.py",
+            "purpose": "FastAPI application: routes, template rendering, static files, and CSRF middleware.",
+            "depends_on": [
+              "config",
+              "db",
+              "models",
+              "recurrence",
+              "money"
+            ],
+            "contract": "Exports:\n- `app: FastAPI` instance ready to be run by `uvicorn`.\n- Routes:\n  * `GET /` \u2013 home page showing this\u2011month view with totals.\n  * `GET /bill/add` & `POST /bill/add` \u2013 create a bill.\n  * `GET /bill/{id}/edit` & `POST /bill/{id}/edit` \u2013 edit a bill.\n  * `POST /bill/{id}/delete` \u2013 soft\u2011delete (archive) a bill.\n  * `POST /bill/{id}/pay` \u2013 record a payment and advance due date.\n  * `POST /payment/{id}/undo` \u2013 undo a payment.\n  * `GET /payments` \u2013 payment history page.\n- Static files served from `/static`.\n- CSRF check middleware that rejects `POST` requests whose `Origin`/`Host` does not match the request host.\nAll handlers return proper HTTP status codes and render Jinja2 templates."
+          }
+        ],
+        "tasks": [
+          {
+            "id": "cfg_load_env",
+            "title": "Implement configuration loader",
+            "module": "config",
+            "prompt": "Create `app/config.py`. Define a `Config` dataclass with `port: int` and `db_path: str`. Implement `load_config()` that reads environment variables `PORT` and `DB_PATH`, falling back to defaults `8000` and `./data/pipez.db`. Export the dataclass, the function, and the two default constants. Use only the standard library.",
+            "tier": "standard",
+            "depends_on": [],
+            "acceptance": [
+              "Running `python -c \"from app.config import load_config; print(load_config())\"` prints a Config with port 8000 and db_path './data/pipez.db' when no env vars are set.",
+              "When `PORT=9000` and `DB_PATH=/tmp/db.sqlite` are exported, `load_config()` returns those exact values.",
+              "The module exports `Config`, `load_config`, `DEFAULT_PORT`, and `DEFAULT_DB_PATH`."
+            ]
+          },
+          {
+            "id": "db_init_schema",
+            "title": "Create SQLite helper and initialise schema",
+            "module": "db",
+            "prompt": "Create `app/db.py`. Use `sqlite3` to open the path from `app.config.load_config().db_path`. Implement `init_db()` that enables foreign keys, creates tables `bills` (id PK, name TEXT, amount_cents INTEGER, due_date DATE, recurrence TEXT, notes TEXT, is_active BOOLEAN) and `payments` (id PK, bill_id INTEGER REFERENCES bills(id), due_date DATE, paid_date DATE, amount_cents INTEGER). Add a `schema_version` table with a single row containing version `1`. Provide `get_connection()` returning a thread\u2011local connection and a thin `execute()` wrapper. All functions must be importable without side effects other than when `init_db()` is called.",
+            "tier": "standard",
+            "depends_on": [
+              "cfg_load_env"
+            ],
+            "acceptance": [
+              "After calling `init_db()`, the SQLite file contains the three tables and the `schema_version` row with value 1.",
+              "`get_connection()` returns a `sqlite3.Connection` object whose `execute('PRAGMA foreign_keys')` returns 1.",
+              "`execute('SELECT name FROM sqlite_master WHERE type=\"table\"')` lists `bills`, `payments`, and `schema_version`."
+            ]
+          },
+          {
+            "id": "models_define",
+            "title": "Define domain models and enums",
+            "module": "models",
+            "prompt": "Create `app/models.py`. Define an `Enum` called `Recurrence` with members ONE_TIME, WEEKLY, BIWEEKLY, MONTHLY, BIMONTHLY, QUARTERLY, SEMIANNUAL, YEARLY. Define `@dataclass` `Bill` with fields `id: int`, `name: str`, `amount_cents: int`, `due_date: date`, `recurrence: Recurrence`, `notes: Optional[str] = None`, `is_active: bool = True`. Define `@dataclass` `Payment` with fields `id: int`, `bill_id: int`, `due_date: date`, `paid_date: date`, `amount_cents: int`. Also create Pydantic models `BillCreate`, `BillUpdate`, `PaymentCreate` for request validation. Use only standard library and pydantic.",
+            "tier": "standard",
+            "depends_on": [],
+            "acceptance": [
+              "Importing `Recurrence` yields an Enum with the eight expected members.",
+              "`Bill` and `Payment` can be instantiated with the listed fields and type\u2011check correctly.",
+              "Pydantic models accept JSON payloads matching the field types and reject missing required fields."
+            ]
+          },
+          {
+            "id": "recurrence_logic",
+            "title": "Implement recurrence date calculations",
+            "module": "recurrence",
+            "prompt": "Create `app/recurrence.py`. Implement `next_due_date(bill: Bill, from_date: date) -> Optional[date]` that returns the next due date after `from_date` according to `bill.recurrence`. Handle:\n- ONE_TIME returns `None`.\n- WEEKLY adds 7 days.\n- BIWEEKLY adds 14 days.\n- MONTHLY adds one month, clamping to the last day of month if the original day does not exist.\n- BIMONTHLY adds two months with the same clamping rule.\n- QUARTERLY adds three months.\n- SEMIANNUAL adds six months.\n- YEARLY adds one year, preserving Feb\u201129 as Feb\u201128 on non\u2011leap years.\nAlso implement `occurrences_in_month(bill: Bill, month: int, year: int) -> List[date]` that enumerates all due dates of the bill falling in the given month/year, using the same logic.\nDo not touch the database; work purely with `datetime.date`.\n",
+            "tier": "deep",
+            "depends_on": [
+              "models_define"
+            ],
+            "acceptance": [
+              "For a weekly bill with due_date 2023-01-01, `next_due_date` called with from_date 2023-01-01 returns 2023-01-08.",
+              "For a monthly bill with due_date 2023-01-31, `next_due_date` for from_date 2023-01-31 returns 2023-02-28 (clamping).",
+              "For a yearly bill with due_date 2020-02-29, `next_due_date` for from_date 2020-02-29 returns 2021-02-28.",
+              "`occurrences_in_month` for a weekly bill starting 2023-01-01 and month=1, year=2023 returns dates [2023-01-01, 2023-01-08, 2023-01-15, 2023-01-22, 2023-01-29]."
+            ]
+          },
+          {
+            "id": "money_formatting",
+            "title": "Add money formatting and parsing utilities",
+            "module": "money",
+            "prompt": "Create `app/money.py`. Implement `format_cents(cents: int) -> str` that returns a string like `$1,234.56` (use commas as thousands separators, always two decimal places, handle negative amounts). Implement `parse_amount(s: str) -> int` that accepts strings produced by `format_cents` (optionally with surrounding whitespace) and returns the integer cent value, raising `ValueError` on malformed input.",
+            "tier": "standard",
+            "depends_on": [],
+            "acceptance": [
+              "`format_cents(123456)` returns `$1,234.56`.",
+              "`format_cents(-5000)` returns `-$50.00`.",
+              "`parse_amount('$1,234.56')` returns `123456`.",
+              "`parse_amount(' -$50.00 ')` returns `-5000`."
+            ]
+          },
+          {
+            "id": "main_setup_routes",
+            "title": "Build FastAPI app with routes and CSRF protection",
+            "module": "main",
+            "prompt": "Create `app/main.py`. Initialise a FastAPI instance, mount static files from `app/static`, and configure Jinja2Templates pointing at `app/templates`. Add middleware that checks the `Origin` or `Host` header on every `POST` request and rejects mismatches with 403. Implement the routes listed in the architecture (home, add/edit/delete bill, mark paid, undo payment, payment history). Use the `config`, `db`, `recurrence`, and `money` modules for business logic. Render the appropriate templates and return HTTP 200 on success, 302 redirects after POSTs, and 404/403 where appropriate. Export the `app` object for `uvicorn`.",
+            "tier": "deep",
+            "depends_on": [
+              "cfg_load_env",
+              "db_init_schema",
+              "models_define",
+              "recurrence_logic",
+              "money_formatting"
+            ],
+            "acceptance": [
+              "Running `uvicorn app.main:app --port 8001` starts a server that responds to `GET /` with status 200 and HTML containing a table of bills.",
+              "Submitting a valid `POST /bill/add` creates a row in the `bills` table and redirects to `/`.",
+              "Marking a bill as paid via `POST /bill/{id}/pay` inserts a payment row and updates the bill's due date according to its recurrence.",
+              "Undoing a payment via `POST /payment/{id}/undo` removes the payment row and restores the previous due date.",
+              "All POST requests without a matching `Host` header are rejected with 403."
+            ]
+          },
+          {
+            "id": "templates_create",
+            "title": "Create Jinja2 HTML templates",
+            "module": "main",
+            "prompt": "Add the following files under `app/templates/`:\n- `base.html` with a `<head>` linking `/static/style.css` and a `{% block content %}{% endblock %}`.\n- `home.html` extending `base.html`, displaying the current month\u2019s bills in a table, highlighting overdue rows, and showing totals for due, paid, and remaining amounts (using `money.format_cents`).\n- `bill_form.html` for adding and editing bills, with fields for name, amount, due date, recurrence (select), notes, and a submit button.\n- `payments.html` listing all payments newest first.\nAll templates must rely on Jinja2 auto\u2011escaping and contain no raw HTML injection points.",
+            "tier": "standard",
+            "depends_on": [],
+            "acceptance": [
+              "`home.html` renders without errors when passed a list of Bill objects and totals.",
+              "Overdue bills receive a CSS class `overdue` that can be styled.",
+              "All templates are reachable via the routes defined in `main_setup_routes` and produce valid HTML."
+            ]
+          },
+          {
+            "id": "static_css",
+            "title": "Add classless CSS stylesheet",
+            "module": "main",
+            "prompt": "Create `app/static/style.css` containing a minimal class\u2011less stylesheet (e.g., Pico.css or a hand\u2011rolled subset) that makes tables readable on desktop and mobile. Ensure the file is served at `/static/style.css` and linked from `base.html`.",
+            "tier": "standard",
+            "depends_on": [],
+            "acceptance": [
+              "Visiting any page loads `style.css` (HTTP 200) and the page displays with readable fonts and responsive layout.",
+              "The CSS file size is under 30\u202fKB."
+            ]
+          },
+          {
+            "id": "tests_core_logic",
+            "title": "Write core\u2011logic pytest suite",
+            "module": "tests",
+            "prompt": "Create tests under `tests/` covering:\n- `app.recurrence.next_due_date` for each recurrence type, including month\u2011end clamping and leap\u2011year handling.\n- `app.recurrence.occurrences_in_month` for weekly and monthly bills.\n- `app.money.format_cents` and `parse_amount` round\u2011trip correctness.\n- Mark\u2011paid flow: using the DB helpers, create a bill, call the route logic (or the underlying function) to record a payment, verify a payment row is inserted and the bill's due date advances correctly.\nRun the suite with `pytest -q`.\n",
+            "tier": "standard",
+            "depends_on": [
+              "recurrence_logic",
+              "money_formatting",
+              "db_init_schema",
+              "models_define"
+            ],
+            "acceptance": [
+              "`pytest -q` exits with code 0 and reports all tests passing.",
+              "At least one test asserts that a monthly bill on Jan\u202f31 advances to Feb\u202f28.",
+              "A test confirms that `format_cents` and `parse_amount` are inverse operations for several values."
+            ]
+          }
+        ],
+        "scaffold_commands": [
+          "git init .",
+          "python -m venv .venv",
+          "source .venv/bin/activate && python -m pip install --upgrade pip",
+          "pip install -r requirements.txt"
+        ],
+        "build_command": "python -m pip install -r requirements.txt",
+        "test_command": "pytest -q",
+        "deploy": {
+          "target": "vm",
+          "install_commands": [
+            "sudo apt-get update -y",
+            "sudo apt-get install -y python3-venv python3-pip",
+            "sudo mkdir -p /opt/pipez",
+            "sudo chown etl:etl /opt/pipez",
+            "tar -xzf pipez.tar.gz -C /opt/pipez",
+            "cd /opt/pipez && python3 -m venv .venv",
+            "source .venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt"
+          ],
+          "start_command": "cd /opt/pipez && source .venv/bin/activate && uvicorn app.main:app --host 0.0.0.0 --port $PORT",
+          "port": 8000,
+          "health_path": "/",
+          "env": [
+            {
+              "name": "PORT",
+              "value": ""
+            },
+            {
+              "name": "DB_PATH",
+              "value": ""
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

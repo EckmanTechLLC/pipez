@@ -1,0 +1,268 @@
+{
+ "architecture": "# pipez: architecture\n\n## Components\n1. **Game core** (`src/games/`): pure, synchronous rules for tic-tac-toe (3x3) and Connect Four (7 columns x 6 rows). It has no I/O.\n2. **Bot** (`src/bot/`): pure move selection for easy, medium and hard, built on the game core.\n3. **Security** (`src/joincode.js`, `src/ratelimit.js`): generates join codes with crypto randomness and keeps in-memory rate limits per IP and per socket. It uses an injectable clock.\n4. **Store** (`src/store.js`): one SQLite file opened with better-sqlite3. It saves only finished matches.\n5. **Rooms** (`src/rooms.js`): the authoritative in-memory session manager. It handles seats, spectators, turn validation, bot turns, the 60 s reconnect grace, the 10 min idle cleanup, rematch, and persistence on game end. It talks to connections only through `conn.send(obj)`, so it can be tested with fake connections.\n6. **Server** (`src/server.js`): one built-in `http` server on PORT. It serves `public/` and `GET /healthz`, and attaches a `ws` WebSocketServer at path `/ws` on the same server. It parses JSON, applies rate limits and dispatches to Rooms.\n7. **Client** (`public/`): vanilla HTML, CSS and JS with no build step and no dependencies. It derives the ws URL from `location` and uses CSS `prefers-color-scheme` for light and dark palettes.\n8. **Docs and ops**: README, LICENSE (MIT) and `deploy/pipez.service`.\n\n## Data flow\nBrowser \u2192 `GET /` (static files) \u2192 `new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/ws')` \u2192 the server sends `welcome {playerId, token}` \u2192 the client sends intents (`create`, `join`, `solo`, `move`, `rematch`, `leave`, `resume`) \u2192 the server checks the rate limit, validates the message and calls RoomManager \u2192 RoomManager validates the move through the game core, changes state and broadcasts `state` to the players and spectators. In bot games it asks the bot for a reply after a 300 ms delay. When a game ends, RoomManager calls `store.saveMatch(record)`.\n\n## Decisions and how each is honoured\n- **Node + ws, no Express**: only `http`, `fs`, `path`, `crypto` and `ws` are used. Runtime dependencies are `ws` and `better-sqlite3` only.\n- **Vanilla client**: three files in `public/`, with no bundler, no npm packages for the client and no external URLs.\n- **System theme**: CSS custom properties for a light palette, overridden in `@media (prefers-color-scheme: dark)`. Both palettes are on the manual checklist.\n- **English only**: all strings are hardcoded.\n- **No auth**: the display name is free text, trimmed and limited to 1\u201324 characters. The ephemeral `playerId` and reconnect `token` are random per connection and kept in client sessionStorage only so the player can resume.\n- **SQLite single file, kept forever**: better-sqlite3 opens `DB_PATH` (default `./data/pipez.sqlite`). The code never deletes rows. Active games live in memory only.\n- **Selectable bot difficulty**: the solo form has an easy/medium/hard picker. Easy plays a winning move if one exists, otherwise blocks, otherwise plays randomly. Medium uses a shallow negamax (tic-tac-toe depth 2, Connect Four depth 3). Hard uses full minimax for tic-tac-toe and alpha-beta for Connect Four at depth 7 with centre-first move ordering.\n- **Code-only lobby**: there is no list endpoint. Join codes are 6 characters from the 31-symbol alphabet `23456789ABCDEFGHJKMNPQRSTUVWXYZ` (no 0/O/1/I/L), about 29.7 bits, generated with `crypto.randomInt`.\n- **Spectators**: a third or later joiner on a game with 2 human seats, or on any bot game, becomes a spectator. Spectators are read-only (moves return the error `SPECTATOR`), and `state.spectators` carries the count.\n- **Server authority**: every move goes through `makeMove`, which checks turn, legality and game-over.\n- **Basic rate limiting**: at most 10 concurrent connections and 30 new connections per minute per IP. Each socket may send 20 messages per second; extra messages are dropped with a `RATE_LIMITED` error, and more than 60 in one second closes the socket with code 1008. Each IP may make 10 failed joins per 10 minutes before joins are blocked until the window ends. `maxPayload` is 4096 bytes.\n- **No telemetry**: there are no outbound calls of any kind, and logging is `console.log` to stdout/journald only.\n- **Direct port 3000, plain HTTP/ws**: the server listens on `PORT` (default 3000) with no TLS. The README warns that traffic is unencrypted.\n- **Existing VM**: deployed with a systemd unit in `deploy/`.\n- **MIT**: a LICENSE file plus `\"license\":\"MIT\"` in package.json.\n- **No CI, basic tests**: `node --test` covers the core, bot, join codes, rate limits and rooms. WebSocket flows are covered by a manual checklist in the README.\n\n## Assumptions adopted\n- A disconnected player has 60 s of grace before forfeiting.\n- A game with no connected human is deleted after 10 min.\n- Player 1 is X / red and moves first, in every game including rematches.\n- Either player can offer a rematch. It starts when both humans accept; in a bot game it starts as soon as the human asks.\n- Messages are JSON with a `type` field.\n- Node 20 or newer, ES modules (`\"type\":\"module\"`).\n\n## OPTIONS (not in scope)\n- A reverse proxy with TLS would remove the unencrypted-traffic caveat. It was not decided, so it is not built.",
+ "stack": [
+  "Node.js >= 20 (ES modules)",
+  "ws ^8 (WebSocket server)",
+  "better-sqlite3 ^11 (SQLite, native)",
+  "node:http, node:fs, node:path, node:crypto (static serving, randomness)",
+  "node:test + node:assert (tests)",
+  "Vanilla HTML/CSS/JS client (no build, no deps)",
+  "systemd (VM process supervision)"
+ ],
+ "repo_layout": "```\npipez/\n\u251c\u2500\u2500 package.json          # type=module, license=MIT, scripts.start/test, engines.node>=20\n\u251c\u2500\u2500 package-lock.json\n\u251c\u2500\u2500 LICENSE               # MIT\n\u251c\u2500\u2500 README.md             # run, env, unencrypted note, backup note, manual checklist\n\u251c\u2500\u2500 .gitignore            # node_modules/, data/\n\u251c\u2500\u2500 deploy/\n\u2502   \u2514\u2500\u2500 pipez.service     # systemd unit\n\u251c\u2500\u2500 data/                 # SQLite file at runtime (gitignored)\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 server.js         # entry: http static + /healthz + ws /ws\n\u2502   \u251c\u2500\u2500 rooms.js          # RoomManager\n\u2502   \u251c\u2500\u2500 store.js          # SQLite match store\n\u2502   \u251c\u2500\u2500 joincode.js       # code generation/normalisation\n\u2502   \u251c\u2500\u2500 ratelimit.js      # in-memory limits\n\u2502   \u251c\u2500\u2500 games/\n\u2502   \u2502   \u251c\u2500\u2500 index.js      # registry + match helpers\n\u2502   \u2502   \u251c\u2500\u2500 tictactoe.js\n\u2502   \u2502   \u2514\u2500\u2500 connect4.js\n\u2502   \u2514\u2500\u2500 bot/\n\u2502       \u2514\u2500\u2500 index.js      # chooseMove\n\u251c\u2500\u2500 public/\n\u2502   \u251c\u2500\u2500 index.html\n\u2502   \u251c\u2500\u2500 style.css\n\u2502   \u2514\u2500\u2500 app.js\n\u2514\u2500\u2500 test/\n    \u251c\u2500\u2500 games.test.js\n    \u251c\u2500\u2500 bot.test.js\n    \u251c\u2500\u2500 security.test.js\n    \u251c\u2500\u2500 store.test.js\n    \u2514\u2500\u2500 rooms.test.js\n```",
+ "modules": [
+  {
+   "name": "games",
+   "path": "src/games/",
+   "purpose": "Pure rules engine for tic-tac-toe and Connect Four: board representation, legal moves, applying moves, win and draw detection, and a match state helper used for server-side validation.",
+   "depends_on": [],
+   "contract": "Files owned: src/games/tictactoe.js, src/games/connect4.js, src/games/index.js, test/games.test.js. All ES modules, no I/O, no dependencies.\n\nBoard: a flat array of length rows*cols. Values are 0 (empty), 1 (player 1) or 2 (player 2). Index = row*cols+col, with row 0 at the top.\n\nEach rules module default-exports an object {type, rows, cols, newBoard(), legalMoves(board), applyMove(board, move, player), getResult(board)}:\n- tictactoe: type 'ttt', rows 3, cols 3. A move is a cell index 0..8.\n- connect4: type 'c4', rows 6, cols 7. A move is a column 0..6, and the piece lands in the lowest empty row of that column.\n- newBoard() returns a fresh array of zeros.\n- legalMoves(board) returns ascending ints; [] if the board is full or already won.\n- applyMove(board, move, player) returns a NEW board and never mutates its input. It throws Error('ILLEGAL_MOVE') if the move is not in legalMoves.\n- getResult(board) returns one of {status:'playing', winner:null, line:null}, {status:'won', winner:1|2, line:[cell indices of the winning run]} or {status:'draw', winner:null, line:null}. Connect Four checks runs of 4 horizontally, vertically and on both diagonals.\n\nindex.js exports:\n- RULES = {ttt, c4}\n- isGameType(t) returns a boolean.\n- createMatch(type) returns {type, board, turn:1, status:'playing', winner:null, line:null, moves:[]}.\n- makeMove(match, player, move) mutates match. It returns {ok:true} or {ok:false, error}, where error is 'GAME_OVER' if status is not 'playing', 'NOT_YOUR_TURN' if player !== turn, or 'ILLEGAL_MOVE' if move is not an integer in legalMoves. On success it pushes the move to moves, updates board, status, winner and line, and flips turn (1<->2) while the game is still playing.\n- forfeit(match, loser) sets status 'won', winner = 3-loser, line null.\n\nTests (node:test) cover every ttt line (rows, columns, diagonals), a ttt draw, c4 horizontal, vertical and both diagonal wins, a c4 full-board draw, column overflow being illegal, gravity, NOT_YOUR_TURN, GAME_OVER, ILLEGAL_MOVE, and applyMove leaving its input unchanged."
+  },
+  {
+   "name": "bot",
+   "path": "src/bot/",
+   "purpose": "Server-side bot move selection for easy, medium and hard difficulty in both games.",
+   "depends_on": [
+    "games"
+   ],
+   "contract": "Files owned: src/bot/index.js, test/bot.test.js.\n\nExports chooseMove(type, board, player, difficulty, rng=Math.random) and DIFFICULTIES = ['easy','medium','hard']. type is 'ttt' or 'c4'; player is 1 or 2.\n\nchooseMove returns an int that is always in RULES[type].legalMoves(board). It throws Error('NO_MOVES') if there are none. The function is pure apart from rng.\n- easy: play an immediately winning move if one exists; else block the opponent's immediate win; else pick uniformly at random using rng.\n- medium: negamax to depth 2 for ttt and depth 3 for c4, with a heuristic evaluation (c4: count of open windows of 2 and 3, plus a centre-column bonus). Ties are broken by rng.\n- hard: full minimax for ttt, which must never lose. For c4, negamax with alpha-beta at depth 7, move order 3,2,4,1,5,0,6, preferring faster wins. Each call must finish in under 1 s on a modest CPU from any position.\n\nTests: every difficulty returns a legal move from 50 random positions in each game; easy takes an immediate win and blocks an immediate loss; hard ttt never loses across all opponent move sequences (exhaustive) when playing either side; hard c4 takes an immediate win and blocks a vertical threat."
+  },
+  {
+   "name": "security",
+   "path": "src/joincode.js, src/ratelimit.js",
+   "purpose": "Join-code generation and normalisation, plus basic in-memory rate limiting per IP and per socket.",
+   "depends_on": [],
+   "contract": "Files owned: src/joincode.js, src/ratelimit.js, test/security.test.js.\n\njoincode.js exports:\n- ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ' (31 characters, none of 0, O, 1, I, L)\n- CODE_LENGTH = 6\n- generateCode(isTaken = () => false) uses crypto.randomInt and retries while isTaken(code) is true, up to 100 tries, then throws.\n- normalizeCode(input) uppercases, strips whitespace and '-', and maps O\u21920? No: it maps 'O'\u2192'0' is NOT done. It returns null if the result is not exactly 6 characters all in ALPHABET.\n\nratelimit.js exports createRateLimiter(opts = {}). Defaults: {maxConcurrentPerIp:10, maxConnectsPerMinute:30, msgsPerSecond:20, hardMsgsPerSecond:60, maxFailedJoins:10, failedJoinWindowMs:600000, now: Date.now}. It returns:\n- allowConnection(ip) returns {ok:true} or {ok:false, reason}, and counts the connection on success.\n- releaseConnection(ip)\n- checkMessage(socketKey) returns 'ok', 'drop' or 'kick'. It uses a fixed 1 s window: more than msgsPerSecond gives 'drop', more than hardMsgsPerSecond gives 'kick'.\n- forgetSocket(socketKey)\n- recordFailedJoin(ip)\n- isJoinBlocked(ip) returns true once maxFailedJoins failures fall within the window.\n- sweep() purges expired entries; the server calls it every 60 s.\n\nTests: 1000 codes are all 6 characters from ALPHABET and unique; isTaken causes a retry; normalizeCode(' ab-c23d ') gives 'ABC23D'; normalizeCode('ABC10O') gives null; connection, message and join limits work using a fake clock, including window reset."
+  },
+  {
+   "name": "store",
+   "path": "src/store.js",
+   "purpose": "SQLite persistence of finished matches in a single file via better-sqlite3. Rows are kept forever.",
+   "depends_on": [],
+   "contract": "Files owned: src/store.js, test/store.test.js.\n\nExports openStore(dbPath = process.env.DB_PATH || './data/pipez.sqlite'). It creates the parent directory (recursive), opens the file with better-sqlite3, sets PRAGMA journal_mode=WAL, and runs CREATE TABLE IF NOT EXISTS matches(id INTEGER PRIMARY KEY AUTOINCREMENT, game_type TEXT NOT NULL, player1_name TEXT NOT NULL, player2_name TEXT NOT NULL, vs_bot INTEGER NOT NULL, bot_difficulty TEXT, winner INTEGER, result TEXT NOT NULL, moves TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT NOT NULL).\n\nIt returns:\n- saveMatch({gameType, player1Name, player2Name, vsBot, botDifficulty, winner, result, moves, startedAt, endedAt}) returns the new id. result is 'win', 'draw' or 'forfeit'; winner is 1, 2 or null; moves is an int array stored as JSON; timestamps are ISO strings.\n- recentMatches(limit = 20) returns rows newest first, with moves parsed back to an array and vsBot as a boolean.\n- close()\n\nThere is no delete or prune function. Tests use a temporary file under os.tmpdir(): save and read back a bot match and a human draw, and check that the file exists on disk."
+  },
+  {
+   "name": "rooms",
+   "path": "src/rooms.js",
+   "purpose": "Authoritative in-memory session manager: join codes, seats, spectators, move validation, bot turns, reconnect grace, idle cleanup, rematch, and persisting results.",
+   "depends_on": [
+    "games",
+    "bot",
+    "security",
+    "store"
+   ],
+   "contract": "Files owned: src/rooms.js, test/rooms.test.js.\n\nExports createRoomManager({store, chooseMove, generateCode, timers = {setTimeout, clearTimeout}, now = Date.now, botDelayMs = 300, graceMs = 60000, idleMs = 600000}). conn is {id, token, ip, send(obj)}; RoomManager never touches sockets.\n\nMethods (all synchronous; problems are reported to the conn as {type:'error', code, message}):\n- create(conn, gameType, name): assigns seat 1, status 'waiting', replies joined, broadcasts state.\n- join(conn, code, name): returns true if the code exists, false if not (the caller then records a failed join). Fills seat 2 and starts play, or adds the conn as a spectator if two seats are taken or it is a bot game.\n- solo(conn, gameType, difficulty, name): seat 1 human vs seat 2 bot, starts immediately.\n- move(conn, move)\n- rematch(conn)\n- leave(conn)\n- disconnect(conn)\n- resume(conn, code, token): re-seats a player within grace if the token matches the seat's token, then replies joined and broadcasts state. Otherwise sends error BAD_CODE.\n- getRoom(code): for tests.\n- size(): number of rooms.\n\nOutgoing messages (the protocol, exactly):\n- {type:'joined', code, role:'player'|'spectator', seat:1|2|null, game:'ttt'|'c4'}\n- {type:'state', code, game, board, rows, cols, turn, status:'waiting'|'playing'|'won'|'draw', winner, line, moves, players:[{seat:1, name, connected, bot:false, difficulty:null},{seat:2, ...}|null], spectators:int, rematch:{1:bool, 2:bool}, forfeit:bool}\n- {type:'left'}\n- error codes: BAD_REQUEST, BAD_CODE, NOT_IN_GAME, SPECTATOR, NOT_YOUR_TURN, ILLEGAL_MOVE, GAME_OVER, RATE_LIMITED\n\nRules:\n- Names are trimmed, control characters stripped, cut to 24 characters, and default to 'Player'.\n- A conn may be in only one room; create, join or solo leaves the previous room first.\n- Moves are validated with makeMove. After a human move in a bot game, the bot replies via chooseMove after botDelayMs.\n- On 'won' or 'draw', store.saveMatch is called exactly once per game, with startedAt set when play began.\n- Disconnecting while playing marks the seat connected:false and starts a graceMs timer; on expiry, forfeit and save with result 'forfeit'. Leaving while playing forfeits immediately.\n- When no human is connected, an idleMs timer deletes the room; it is cancelled on reconnect.\n- Rematch: once both humans accept (immediately in a bot game), reset the board, set turn 1, keep seats.\n- Spectators can join after the game has ended.\n\nTests use fake conns, a fake store, a deterministic chooseMove and fake timers: create/join/spectator, a spectator move rejected, turn enforcement, a bot reply, a win saved once, grace forfeit, idle deletion, rematch."
+  },
+  {
+   "name": "server",
+   "path": "src/server.js",
+   "purpose": "Process entry point: one node:http server on PORT serving public/ and /healthz, with a ws WebSocketServer at /ws on the same port. Parses JSON intents, applies rate limits, dispatches to RoomManager.",
+   "depends_on": [
+    "rooms",
+    "security",
+    "store",
+    "bot"
+   ],
+   "contract": "Files owned: src/server.js.\n\nReads env PORT (default 3000), HOST (default '0.0.0.0') and DB_PATH (passed to openStore). It exports startServer({port, dbPath}), which resolves to {server, close()}. It auto-starts when run directly (import.meta.url === pathToFileURL(process.argv[1]).href).\n\nHTTP:\n- GET /healthz returns 200 application/json {\"ok\":true}.\n- GET / serves public/index.html.\n- GET /<file> serves files from public/ only, after resolving with path.resolve and rejecting anything outside public/ with 404. MIME types: .html, .css, .js, .svg, .ico.\n- Headers: Cache-Control: no-cache, and Content-Security-Policy \"default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:\".\n- Other methods return 405; missing files return 404.\n\nWebSocket: new WebSocketServer({server, path:'/ws', maxPayload:4096}). The IP comes from req.socket.remoteAddress (there is no proxy, so X-Forwarded-For is ignored). On connection:\n- If limiter.allowConnection fails, send error RATE_LIMITED and close(1008).\n- Otherwise assign id = crypto.randomUUID() and token = 16 random bytes as hex, and send {type:'welcome', playerId, token}.\n\nEach message:\n- limiter.checkMessage: 'drop' sends error RATE_LIMITED and ignores the message; 'kick' sends the error and closes with 1008.\n- Parse JSON; a parse failure or unknown type gives BAD_REQUEST.\n- Intents (client\u2192server):\n  - {type:'create', game:'ttt'|'c4', name}\n  - {type:'join', code, name}: normalizeCode is applied first. If the IP is join-blocked, send RATE_LIMITED. If the code is invalid or join() returns false, call recordFailedJoin and send BAD_CODE.\n  - {type:'solo', game, difficulty:'easy'|'medium'|'hard', name}\n  - {type:'move', move:int}\n  - {type:'rematch'}\n  - {type:'leave'}\n  - {type:'resume', code, token}\n  - {type:'ping'}, answered with {type:'pong'}\n- On close: rooms.disconnect, limiter.releaseConnection, limiter.forgetSocket.\n\nOther behaviour:\n- limiter.sweep() runs every 60 s.\n- Logs one stdout line per connect, disconnect, game start and game end.\n- Makes no outbound network calls.\n\nTested manually (README checklist), plus the verification gate starts the server and fetches /healthz."
+  },
+  {
+   "name": "client",
+   "path": "public/",
+   "purpose": "Vanilla browser UI: name entry, create/join by code, solo vs bot with a difficulty picker, board rendering for both games, spectator count, rematch, and a light/dark theme that follows the system setting.",
+   "depends_on": [
+    "server"
+   ],
+   "contract": "Files owned: public/index.html, public/style.css, public/app.js. No external URLs anywhere: no fonts, CDNs or scripts (a grep for 'http' in public/ finds only nothing or comments). The system font stack is used. app.js is a plain <script defer src=\"app.js\">, with no modules from a CDN.\n\nUses only the server protocol defined in the server and rooms contracts.\n\nConnection:\n- ws URL: (location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/ws'.\n- After 'welcome', store {playerId, token} in sessionStorage.\n- On 'joined', store the code.\n- On socket close, show 'Disconnected, reconnecting\u2026' and retry every 2 s. After reconnecting, send {type:'resume', code, token:<old token>} if a game code is stored.\n\nScreens:\n1. Lobby: a name input (maxlength 24, saved in localStorage); a game-type radio (Tic-tac-toe / Connect Four); a 'Create game' button; a code input with a 'Join' button; 'Play vs bot' with an Easy/Medium/Hard select.\n2. Game:\n   - shows the join code with a copy button, plus 'Share this code to invite a player' while waiting\n   - shows the player names (X/Red vs O/Yellow), with '(bot, hard)' for the bot and '(disconnected)' when a player is offline\n   - turn indicator 'Your turn' / 'Waiting for <name>'\n   - spectator count 'Spectators: N', and a 'Spectating' badge when you are a spectator\n   - board: ttt is 3x3 buttons; c4 is 7 clickable columns of 6 cells\n   - highlights the winning line\n   - result text 'You win' / '<name> wins' / 'Draw' / '(forfeit)'\n   - a 'Rematch' button (players only, after the game ends) showing 'Opponent wants a rematch'\n   - a 'Leave' button\n3. Error toasts show error.message.\n\nAll names are rendered with textContent, never innerHTML.\n\nTheme: CSS custom properties (--bg, --fg, --panel, --accent, --p1, --p2, --cell, --win) defined under :root for light and overridden in @media (prefers-color-scheme: dark), with color-scheme: light dark. Both palettes keep text contrast at 4.5:1 or better. Manually tested via the README checklist in both OS themes."
+  },
+  {
+   "name": "docs",
+   "path": "README.md, LICENSE, deploy/pipez.service",
+   "purpose": "Run instructions, security and backup notes, a manual WebSocket test checklist, the MIT license and a systemd unit for the VM.",
+   "depends_on": [],
+   "contract": "Files owned: README.md, LICENSE, deploy/pipez.service.\n\nLICENSE: standard MIT text with copyright line 'Copyright (c) 2025 pipez contributors'.\n\nREADME sections:\n- Requirements (Node 20+, and build tools for better-sqlite3 if prebuilt binaries are unavailable)\n- Install and run (npm ci; npm start; open http://<host>:3000)\n- Configuration (PORT default 3000, HOST default 0.0.0.0, DB_PATH default ./data/pipez.sqlite)\n- Running tests (npm test)\n- Deploy on a VM with systemd (copy to /opt/pipez, install the unit, systemctl enable --now pipez, journalctl -u pipez)\n- Security note: traffic is plain HTTP/ws and unencrypted; do not enter sensitive data\n- Backups: back up the SQLite file regularly, e.g. sqlite3 data/pipez.sqlite \".backup backup.sqlite\"; history is kept forever and grows without limit\n- Privacy: no telemetry or third-party calls; local logs only\n- Manual test checklist (at least 12 checkbox items): create/join both games, a spectator joins third and sees the count, a spectator cannot move, an out-of-turn move is rejected, win/draw shown, rematch, solo easy/medium/hard in both games, disconnect and reconnect within 60 s, forfeit after 60 s, a wrong code is rejected and repeated wrong codes get rate-limited, message flood disconnects, light and dark themes both checked, no external requests in the browser devtools network tab\n- License\n\ndeploy/pipez.service:\n[Unit] Description=pipez, After=network.target\n[Service] User=etl, WorkingDirectory=/opt/pipez, Environment=PORT=3000, Environment=DB_PATH=/opt/pipez/data/pipez.sqlite, ExecStart=/usr/bin/node src/server.js, Restart=on-failure\n[Install] WantedBy=multi-user.target"
+  }
+ ],
+ "tasks": [
+  {
+   "id": "T1",
+   "title": "Game core: tic-tac-toe and Connect Four rules + tests",
+   "module": "games",
+   "prompt": "Implement src/games/tictactoe.js, src/games/connect4.js and src/games/index.js exactly as the 'games' module contract specifies. Use ES modules with no dependencies.\n\nBoards are flat arrays: 0 is empty, 1 and 2 are the players, index = row*cols+col, row 0 at the top. tic-tac-toe moves are cell indices 0..8. Connect Four moves are columns 0..6, and the piece drops to the lowest empty row. applyMove must return a new array and throw Error('ILLEGAL_MOVE') on an illegal move. getResult returns {status, winner, line}, where line lists the winning cell indices. legalMoves returns [] if the board is won or full. index.js exports RULES, isGameType, createMatch, makeMove (with errors GAME_OVER, NOT_YOUR_TURN and ILLEGAL_MOVE, checked in that order; it rejects non-integers) and forfeit.\n\nWrite test/games.test.js with node:test covering all 8 ttt lines, a ttt draw, c4 wins in all 4 directions (including on edges), a c4 full-board draw, column overflow, gravity, the makeMove errors, and input immutability.",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "`node --test test/games.test.js` passes",
+    "createMatch('c4') returns board length 42, turn 1, status 'playing', moves []",
+    "makeMove on a full Connect Four column returns {ok:false, error:'ILLEGAL_MOVE'}",
+    "makeMove by player 2 on a fresh match returns {ok:false, error:'NOT_YOUR_TURN'}",
+    "getResult on a Connect Four diagonal win returns status 'won' with a 4-element line"
+   ]
+  },
+  {
+   "id": "T2",
+   "title": "Join codes and rate limiter + tests",
+   "module": "security",
+   "prompt": "Implement src/joincode.js and src/ratelimit.js as the 'security' module contract specifies.\n\njoincode.js:\n- ALPHABET is '23456789ABCDEFGHJKMNPQRSTUVWXYZ' and CODE_LENGTH is 6.\n- generateCode(isTaken) uses crypto.randomInt for each character and retries up to 100 times while isTaken(code) returns true, then throws.\n- normalizeCode(input) uppercases, removes whitespace and '-', and returns null unless the result is exactly 6 characters from ALPHABET. Do not map look-alike characters.\n\nratelimit.js: createRateLimiter(opts) with the defaults from the contract (10 concurrent connections and 30 connects per minute per IP; 20 msgs/s gives 'drop' and 60 msgs/s gives 'kick' per socket using a fixed 1 s window; 10 failed joins per 10 minutes per IP blocks joins). It exposes allowConnection, releaseConnection, checkMessage, forgetSocket, recordFailedJoin, isJoinBlocked and sweep, and uses opts.now for all time.\n\nWrite test/security.test.js: alphabet and length checks over 1000 codes, uniqueness, isTaken retry, normalisation cases, and every limiter rule including window reset, using a fake clock.",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "`node --test test/security.test.js` passes",
+    "generateCode() returns a 6-character string matching /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{6}$/",
+    "normalizeCode(' ab-c23d ') returns 'ABC23D' and normalizeCode('ABC10O') returns null",
+    "After 10 recordFailedJoin calls for an IP, isJoinBlocked returns true; after advancing the fake clock past 600000 ms it returns false"
+   ]
+  },
+  {
+   "id": "T3",
+   "title": "SQLite match store + tests",
+   "module": "store",
+   "prompt": "Implement src/store.js as the 'store' module contract specifies, using better-sqlite3 (already installed).\n\nopenStore(dbPath) defaults to process.env.DB_PATH or './data/pipez.sqlite'. It creates the parent directory recursively, enables WAL, and creates the matches table exactly as the contract gives it. It returns saveMatch(record) (which returns the inserted id; moves are stored as JSON and vs_bot as 0/1), recentMatches(limit = 20) (newest first, with moves parsed and vsBot as a boolean) and close(). Prepare statements once. Provide no delete or prune function.\n\nWrite test/store.test.js using a unique path under os.tmpdir(): save a bot match (hard, winner 2) and a human draw (winner null), read both back with recentMatches, check that the field values round-trip, and check that the file exists. Remove the temp file afterwards.",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "`node --test test/store.test.js` passes",
+    "After openStore('/tmp/x/pipez.sqlite'), the file /tmp/x/pipez.sqlite exists and contains a table named matches with columns game_type, player1_name, player2_name, vs_bot, bot_difficulty, winner, result, moves, started_at, ended_at",
+    "src/store.js contains no DELETE statement"
+   ]
+  },
+  {
+   "id": "T4",
+   "title": "Bot: easy/medium/hard for both games + tests",
+   "module": "bot",
+   "prompt": "Implement src/bot/index.js as the 'bot' module contract specifies. Import RULES from '../games/index.js' and use only legalMoves, applyMove and getResult. Export DIFFICULTIES and chooseMove(type, board, player, difficulty, rng=Math.random).\n\n- easy: play an immediate win if one exists, else block the opponent's immediate win, else a random legal move.\n- medium: negamax to depth 2 for ttt and depth 3 for c4, using a heuristic that scores c4 windows of 4 (2 or 3 own pieces with the rest empty, positive; the opponent's, negative) plus a centre-column bonus. Ties are broken with rng.\n- hard: full minimax for ttt (score wins by depth so the bot wins fast and loses slow), and negamax with alpha-beta at depth 7 for c4 with move order [3,2,4,1,5,0,6]. It must take under 1 s per call.\n\nThe returned move must always be legal; throw Error('NO_MOVES') if there are none.\n\nWrite test/bot.test.js:\n- legality across 50 random reachable positions \u00d7 3 difficulties \u00d7 2 games\n- easy wins and blocks\n- an exhaustive check that hard ttt never loses as player 1 or player 2 against every opponent move sequence\n- hard c4 takes an immediate win and blocks a vertical three\n- one hard c4 call from the empty board completes in under 1000 ms",
+   "tier": "deep",
+   "depends_on": [
+    "T1"
+   ],
+   "acceptance": [
+    "`node --test test/bot.test.js` passes",
+    "chooseMove('ttt', [1,1,0,2,2,0,0,0,0], 2, 'easy') returns 5 (win beats block)",
+    "chooseMove('c4', emptyBoard, 1, 'hard') returns a legal column within 1000 ms",
+    "The exhaustive test shows hard tic-tac-toe never loses from either seat"
+   ]
+  },
+  {
+   "id": "T5",
+   "title": "RoomManager: sessions, spectators, bot turns, grace, rematch, persistence + tests",
+   "module": "rooms",
+   "prompt": "Implement src/rooms.js exactly as the 'rooms' module contract specifies, including every outgoing message shape, error code and timing rule. Its dependencies are injected: store, chooseMove, generateCode, timers and now. Import createMatch, makeMove, forfeit, isGameType and RULES from './games/index.js'. Keep rooms in a Map keyed by code and a Map from conn.id to {code, role, seat}.\n\nKey behaviours:\n- create, join and solo leave any previous room first.\n- join returns false for an unknown code and does not send BAD_CODE itself; the server does that.\n- A third or later human, or anyone joining a bot game, becomes a spectator.\n- Each seat stores the token of the conn that took it; resume re-seats a player when the token matches and the seat is disconnected.\n- Bot replies come via timers.setTimeout(botDelayMs). Check that the room still exists and the game is still playing before the bot moves.\n- saveMatch is called exactly once per finished game, including forfeits (result 'forfeit'). Use ISO timestamps from now(). vsBot and botDifficulty are set for solo games, and the bot's name is 'Bot (<difficulty>)'.\n- Disconnect: mark the seat disconnected and start the grace timer (forfeit on expiry if still playing). If no human is connected, start the idle timer and delete the room when it fires. Clear timers when they no longer apply.\n- Waiting rooms whose creator disconnects follow the idle rule only.\n- Spectators count in state.spectators, are removed on disconnect, and get error SPECTATOR when they try to move or ask for a rematch.\n- Rematch: set the flag for the seat. When both are set (or the human asks in a bot game), reset to createMatch(type) with turn 1 and clear the flags.\n- Broadcast state after every change to all players and spectators.\n\nWrite test/rooms.test.js with fake conns (which record what they are sent), a fake store, a deterministic chooseMove (first legal move), a sequential generateCode and controllable fake timers. Cover: create/join/spectator count, spectator move rejected, NOT_YOUR_TURN, ILLEGAL_MOVE, a bot reply after the timer fires, a ttt win saved once with correct fields, grace forfeit after 60000 ms, resume within grace, idle deletion after 600000 ms, rematch reset.",
+   "tier": "deep",
+   "depends_on": [
+    "T1",
+    "T2"
+   ],
+   "acceptance": [
+    "`node --test test/rooms.test.js` passes",
+    "A third conn joining a full human game receives {type:'joined', role:'spectator', seat:null} and the state broadcast shows spectators: 1",
+    "A finished game calls store.saveMatch exactly once with gameType, both names, vsBot, botDifficulty, winner, result, moves, startedAt and endedAt",
+    "After a player disconnects and fake time advances 60000 ms, state shows status 'won', forfeit true, and the other seat as winner"
+   ]
+  },
+  {
+   "id": "T6",
+   "title": "HTTP + WebSocket server entry point",
+   "module": "server",
+   "prompt": "Implement src/server.js as the 'server' module contract specifies. Use only node:http, node:fs, node:path, node:url, node:crypto and ws; no Express.\n\n- Export startServer({port, dbPath}), which resolves once listening to {server, close()}. close() shuts the WebSocketServer, the http server and the store, and clears intervals. Auto-start when the file is run directly, using PORT (default 3000), HOST (default 0.0.0.0) and DB_PATH.\n- Wire openStore, createRoomManager({store, chooseMove, generateCode: () => generateCode(code => rooms.getRoom(code) != null)}) and createRateLimiter.\n- HTTP: GET /healthz returns 200 {\"ok\":true}. Serve static files from public/ with the listed MIME types, the CSP header and Cache-Control: no-cache. Block path traversal (404), return 405 for non-GET/HEAD, and 404 for missing files.\n- WebSocket: path /ws, maxPayload 4096. Apply connection limits, send the welcome {playerId, token}, rate-limit each message (drop/kick), parse JSON safely, and validate each intent's fields (game in ttt/c4, difficulty in DIFFICULTIES, move an integer, name a string) or send BAD_REQUEST.\n- join flow: normalizeCode, then the join-block check (RATE_LIMITED), then rooms.join. When the code is invalid or join returns false, call recordFailedJoin and send BAD_CODE 'No game with that code'.\n- Answer ping with pong. On close, call rooms.disconnect, releaseConnection and forgetSocket.\n- Wrap ws.send in a readyState check.\n- Log one concise line for each connect, disconnect, create, join, solo and error to stdout. No outbound requests.",
+   "tier": "standard",
+   "depends_on": [
+    "T5"
+   ],
+   "acceptance": [
+    "With the server running via `npm start`, `curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/healthz` prints 200 and the body is {\"ok\":true}",
+    "GET / returns 200 text/html containing the client page; GET /../package.json and GET /%2e%2e/package.json return 404",
+    "A WebSocket client connecting to ws://localhost:3000/ws first receives a message with type 'welcome' and string playerId and token",
+    "Sending {\"type\":\"join\",\"code\":\"ZZZZZZ\",\"name\":\"a\"} returns {type:'error', code:'BAD_CODE'}; after 10 such failures from one IP, the next join returns code 'RATE_LIMITED'",
+    "Sending invalid JSON returns an error with code 'BAD_REQUEST'"
+   ]
+  },
+  {
+   "id": "T7",
+   "title": "Vanilla client UI with light/dark palettes",
+   "module": "client",
+   "prompt": "Build public/index.html, public/style.css and public/app.js as the 'client' module contract specifies. No build step, no dependencies, no external URLs (system font stack only). Use only the protocol messages defined in the rooms and server contracts.\n\n- Lobby: a name input (maxlength 24, persisted in localStorage); a game-type choice (Tic-tac-toe / Connect Four); a Create game button; a code input (uppercase, maxlength 7) with Join; Play vs bot with an Easy/Medium/Hard select and the game-type choice.\n- Game view:\n  - the code with a copy button (navigator.clipboard, falling back to selecting the text)\n  - player labels: X/O for ttt, Red/Yellow for c4, '(bot, <difficulty>)' and '(disconnected)' suffixes\n  - turn text, 'Spectators: N', a 'Spectating' badge for spectators\n  - the board: ttt is 3x3 buttons; c4 is 7 columns \u00d7 6 rows where clicking a column sends {type:'move', move:col}\n  - disable input when it is not your turn or the game is over; highlight state.line\n  - result text and a forfeit note; Rematch (players only, after the end) with 'Opponent wants a rematch'; Leave, which returns to the lobby\n- Error toasts. Render user text only via textContent.\n- ws URL derived from location (ws: for http). Persist {token, code} in sessionStorage; on close, show a reconnecting banner, retry every 2 s, and send resume with the old token and code.\n- Theme: define CSS variables in :root (light) and override them in @media (prefers-color-scheme: dark), with color-scheme: light dark. Style every element in both palettes with text contrast of 4.5:1 or better and distinct p1/p2 colours in each. Make the layout responsive down to 360 px wide.",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "public/index.html, public/style.css and public/app.js exist and `grep -rE 'https?://' public/` returns no matches",
+    "public/style.css contains an `@media (prefers-color-scheme: dark)` block that overrides the same custom properties defined in :root",
+    "public/app.js builds the WebSocket URL from location.protocol and location.host with path /ws",
+    "public/app.js never assigns innerHTML using player names (names are set via textContent)",
+    "Loading http://localhost:3000/ in a browser shows the lobby with name, game type, Create, Join code and Play vs bot with an Easy/Medium/Hard selector"
+   ]
+  },
+  {
+   "id": "T8",
+   "title": "README, LICENSE and systemd unit",
+   "module": "docs",
+   "prompt": "Write README.md, LICENSE and deploy/pipez.service as the 'docs' module contract specifies.\n\n- LICENSE: the standard MIT text with 'Copyright (c) 2025 pipez contributors'.\n- README:\n  - what pipez is\n  - requirements (Node 20+; build-essential and python3 only if no better-sqlite3 prebuilt binary is available)\n  - install/run (npm ci, npm start, open http://<host>:3000)\n  - configuration (PORT=3000, HOST=0.0.0.0, DB_PATH=./data/pipez.sqlite)\n  - tests (npm test)\n  - VM deployment with the systemd unit (copy to /opt/pipez, npm ci --omit=dev, sudo cp deploy/pipez.service /etc/systemd/system/, sudo systemctl daemon-reload, sudo systemctl enable --now pipez, journalctl -u pipez -f)\n  - a clearly marked 'Security: traffic is unencrypted' note (plain HTTP/ws on port 3000, no TLS)\n  - 'Backups' (back up the SQLite file, sqlite3 .backup example; history is kept forever and the database grows without limit)\n  - 'Privacy' (no telemetry or third-party calls; local logs only)\n  - a 'Manual test checklist' with the checkbox items listed in the contract\n  - the rate-limit numbers\n  - License (MIT)\n- deploy/pipez.service: exactly the unit fields given in the contract.",
+   "tier": "light",
+   "depends_on": [],
+   "acceptance": [
+    "LICENSE exists and begins with 'MIT License'",
+    "README.md contains the sections 'Security', 'Backups' and 'Manual test checklist', and mentions PORT, DB_PATH and that traffic is unencrypted",
+    "The README manual checklist has at least 12 '- [ ]' items, including light and dark theme checks and spectator checks",
+    "deploy/pipez.service contains WorkingDirectory=/opt/pipez, User=etl and ExecStart=/usr/bin/node src/server.js"
+   ]
+  },
+  {
+   "id": "T9",
+   "title": "Integration verification gate",
+   "module": "server",
+   "prompt": "From the repo root, run `npm ci`, then `npm test`, and fix any integration mismatches between modules against their contracts. Fix the module that diverges from its contract; do not change the contracts.\n\nThen start the server locally with `PORT=3100 DB_PATH=/tmp/pipez-gate.sqlite node src/server.js` and check:\n- curl /healthz returns 200\n- curl / returns 200 HTML, and /style.css and /app.js are served with the correct content types\n\nThen write a throwaway Node script (not committed) using the installed ws package to:\n- create a ttt game, join it with a second socket, and join a third socket as a spectator\n- play to a win\n- confirm that a row now exists in the SQLite file\n- run a solo c4 hard game for a few moves and confirm the bot replies\n\nStop the server afterwards. Run only local commands. Confirm that package.json has \"license\":\"MIT\", \"type\":\"module\", a scripts.start of 'node src/server.js', and a scripts.test of 'node --test'.",
+   "tier": "deep",
+   "depends_on": [
+    "T3",
+    "T4",
+    "T5",
+    "T6",
+    "T7",
+    "T8"
+   ],
+   "acceptance": [
+    "`npm test` passes from the repo root",
+    "`node src/server.js` with PORT=3100 serves 200 on /healthz, /, /style.css and /app.js",
+    "After a played-out WebSocket game, the matches table in the DB_PATH file contains a row with result 'win' and a JSON move list",
+    "package.json contains \"license\": \"MIT\" and dependencies ws and better-sqlite3 only"
+   ]
+  }
+ ],
+ "scaffold_commands": [
+  "git init",
+  "npm init -y",
+  "npm pkg set name=pipez version=0.1.0 type=module license=MIT main=src/server.js scripts.start=\"node src/server.js\" scripts.test=\"node --test\" engines.node=\">=20\"",
+  "npm install ws@^8 better-sqlite3@^11",
+  "mkdir -p src/games src/bot public test deploy data",
+  "printf 'node_modules/\\ndata/\\n' > .gitignore"
+ ],
+ "build_command": "npm ci && node --check src/server.js",
+ "test_command": "npm test",
+ "deploy": {
+  "target": "vm",
+  "install_commands": [
+   "sudo apt-get update",
+   "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl build-essential python3",
+   "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -",
+   "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs",
+   "sudo chown -R etl:etl /opt/pipez",
+   "npm ci --omit=dev",
+   "mkdir -p /opt/pipez/data"
+  ],
+  "start_command": "node src/server.js",
+  "port": 3000,
+  "health_path": "/healthz",
+  "env": [
+   {
+    "name": "PORT",
+    "value": "3000"
+   },
+   {
+    "name": "HOST",
+    "value": "0.0.0.0"
+   },
+   {
+    "name": "DB_PATH",
+    "value": "/opt/pipez/data/pipez.sqlite"
+   }
+  ]
+ }
+}

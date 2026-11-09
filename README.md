@@ -25,12 +25,21 @@ Stop: `fuser -k 8400/tcp`
 | `PIPEZ_LOCAL_BASE_URL` / `PIPEZ_LOCAL_MODEL` | unset | OpenAI-compatible endpoint (vLLM); the `local` tier exists only when the URL is set |
 | `PIPEZ_LOCAL_API_KEY` | empty | optional bearer token for the local endpoint |
 | `PIPEZ_LOCAL_TIMEOUT` / `PIPEZ_LOCAL_TEMPERATURE` | 600 / 0.2 | local call timeout (s), sampling temperature |
+| `PIPEZ_LOCAL_MAX_TOKENS` / `PIPEZ_LOCAL_REASON_MAX_TOKENS` | 16000 / the `local` value | `max_tokens` sent on each local call (per tier); Anthropic tiers keep `PIPEZ_MAX_TOKENS` |
 | `PIPEZ_LOCAL_THINKING` | 0 | 1 = enable qwen3 thinking (`enable_thinking`) |
-| `PIPEZ_ESCALATE` | 1 | on a failed call, retry on the next tier up (local, light, standard, deep) |
+| `PIPEZ_LOCAL_REASONING_EFFORT` | empty | `low`/`medium`/`high`: sent as `reasoning_effort` by the `local` tier (gpt-oss-style models); empty = not sent |
+| `PIPEZ_LOCAL_REASON_BASE_URL` / `PIPEZ_LOCAL_REASON_MODEL` | unset | second OpenAI-compatible endpoint, the `local_reason` tier (reasoner); exists only when the URL is set |
+| `PIPEZ_LOCAL_REASON_API_KEY` / `_TIMEOUT` / `_TEMPERATURE` | fall back to the `PIPEZ_LOCAL_*` values | per-tier key, timeout (s), temperature |
+| `PIPEZ_LOCAL_REASON_THINKING` / `_REASONING_EFFORT` | 0 / empty | `enable_thinking` flag / `reasoning_effort` (`low`/`medium`/`high`) for `local_reason` |
+| `PIPEZ_LOCAL_REASON_STAGES` | empty | stages that may auto-select `local_reason` (same names as `PIPEZ_LOCAL_STAGES`) |
+| `PIPEZ_ESCALATE` | 1 | on a failed call, retry on the next tier up (local, local_reason, light, standard, deep) |
 | `PIPEZ_INTAKE_TIER` | `deep` | tier of the intake discovery call (invalid names fall back to `deep`) |
 | `PIPEZ_PLAN_EFFORT` | `high` | effort of the plan call |
 | `PIPEZ_PLAN_REVISION_TIER` | `deep` | tier for plan revision rounds (previous plan + human note; invalid names fall back to `deep`) |
 | `PIPEZ_PLAN_REVISION_EFFORT` | `PIPEZ_PLAN_EFFORT` | effort for plan revision rounds |
+| `PIPEZ_PLAN_GATE` | `warn` | mechanical plan gate (`pipez/plangate.py`, no LLM): `off`, `warn` (violations become plan warnings) or `revise` (errors are fed back to the planner as an automated revision note). The gate never fails a run: it revises (bounded) or warns, then the plan goes to human review. Recorded in `plan_meta.gate` |
+| `PIPEZ_PLAN_GATE_ROUNDS` | 3 | max gate revision rounds in `revise` mode (they run on `PIPEZ_PLAN_REVISION_TIER`/`_EFFORT`) |
+| `PIPEZ_PLAN_GATE_MIN_PROMPT_CHARS` | 400 | minimum task prompt length for `task_prompt_thin` |
 | `PIPEZ_MAX_TOKENS` | 128000 | per-call output cap |
 | `PIPEZ_TASK_RETRIES` / `PIPEZ_RETRY_DELAY` | 3 / 20 | transient-failure retries, base delay (s) |
 | `PIPEZ_FALLBACKS` | 1 | server-side refusal fallbacks |
@@ -52,6 +61,21 @@ Stop: `fuser -k 8400/tcp`
 | `PIPEZ_DB` | `./pipez.sqlite3` | |
 | `PIPEZ_ARTIFACTS_DIR` | `./artifacts` | |
 | `PIPEZ_HOST` / `PIPEZ_PORT` | `127.0.0.1` / 8400 | |
+
+Plan gate checks (in `revise` mode only errors trigger a round; warnings are reported):
+
+- `module_dep_unknown` (error): a module depends on a name that is not a module.
+- `task_module_unknown` (error): a task's module is not a module name (`none`, `*`, empty).
+- `dep_coverage` (error): a task depends, directly or transitively, on no task of some module its module depends on, and its prompt names none of that module's interface symbols.
+- `contract_interface` (error if another module depends on it or it is HTTP/WebSocket-facing, else warn): the contract lists no function signatures; network-facing modules also need routes or message shapes. Checked only for `code`/`unknown` modules.
+- `contract_files` (warn): the contract names no owned file.
+- `consumer_names_interface` (error): a module's contract and tasks never mention a module it depends on or its symbols.
+- `task_prompt_thin`: error only when the prompt is shorter than the minimum **and** names no symbol/file of its module's contract; warn when exactly one of the two holds (the message says which). Tasks on `docs`/`infra` modules are exempt; tasks on `tests` modules skip the length rule but must name a symbol/file of their own module or a dependency (else error).
+- `acceptance_not_checkable` (warn): no criterion with a command, HTTP status/path or file path.
+- `manual_testing_only` (warn): the contract's only testing is manual.
+- Module kinds (`plangate.module_kind`, from the module path, name and the "files owned" part of its contract): `code` (any owned non-test code file), `tests` (test files/dirs or named `tests`), `docs` (README/LICENSE/`docs/`/`*.md` only), `infra` (Dockerfile, docker-compose, `deploy/`, `*.service`, Makefile, CI, `.env*`), else `unknown` (treated as `code`). `tests`/`docs`/`infra` modules skip `contract_interface`; dependencies *into* them, and tasks *on* `docs`/`infra`, are exempt from `dep_coverage`; `docs`/`infra` modules are exempt from `consumer_names_interface`, and a `tests` module satisfies it by naming any test file path.
+- `task_touches_deployment`, `process_acceptance_criteria` (warn): the earlier planner-rule heuristics.
+
 
 ## Preferences
 
@@ -147,21 +171,57 @@ When the plan has `deploy.target == "vm"` (the architect fills it when the brief
 - Mock mode: the "VM" is a temp dir, the service a local background process (a free port is used if the plan's is busy), `sudo`/`apt` install commands are skipped, there is no systemd; undeploy kills it.
 - UI: run header shows `Deployed: <url>`, the failure tail, and Deploy / Undeploy buttons; the plan panel shows the deploy target, port, health path and install-command count.
 
-## Local tier
-An optional `local` tier (OpenAI-compatible endpoint, e.g. vLLM serving qwen3.6) exists when
-`PIPEZ_LOCAL_BASE_URL` and `PIPEZ_LOCAL_MODEL` are set. Measured throughput is about 9 output
-tokens/s, so long outputs take minutes; `PIPEZ_LOCAL_TIMEOUT` bounds a call and a truncated
-response reports its elapsed seconds and output tokens. Code tasks never run on `local` (a plan
-task with `tier=local` is coerced to `light`, logged as `tier_coerced`). `PIPEZ_LOCAL_STAGES`
-(comma list of `intake,brief,plan,decide,synthesize`, default empty) lists the stages that may
-auto-select `local`; with it empty `local` is used only by an explicit task tier override and by
-the benchmark. To decide where to allow it, replay stored runs through the tiers:
+## Local tiers
+Two optional OpenAI-compatible tiers (e.g. vLLM): `local`, a fast coder (Qwen-style chat
+template; `PIPEZ_LOCAL_THINKING` sets `chat_template_kwargs.enable_thinking`), exists when
+`PIPEZ_LOCAL_BASE_URL` and `PIPEZ_LOCAL_MODEL` are set; `local_reason`, a deeper reasoner
+(gpt-oss-style; `PIPEZ_LOCAL_REASON_REASONING_EFFORT` is sent as `reasoning_effort`), exists
+when `PIPEZ_LOCAL_REASON_BASE_URL` and `PIPEZ_LOCAL_REASON_MODEL` are set. Each tier carries its
+own endpoint, model, key, timeout, temperature and thinking settings (`local_reason` key, timeout
+and temperature default to the `local` values). `reasoning_effort` is for gpt-oss-style models
+while `enable_thinking` is for Qwen-style ones; `enable_thinking` is always sent, `reasoning_effort`
+only when set. Throughput depends on the serving host, so long outputs can take minutes;
+`PIPEZ_LOCAL_TIMEOUT` bounds a call and a truncated response reports its elapsed seconds and
+output tokens. Each local call is capped at `PIPEZ_LOCAL_MAX_TOKENS` (16000; `PIPEZ_LOCAL_REASON_MAX_TOKENS`
+for `local_reason`, defaulting to the same) because an uncapped reasoning model can fill its whole
+context. A local call that times out or is truncated at that cap is not retried by the facade
+(identical retries would just queue more runaway generations on the server); it fails at once and
+the engine escalates to the next tier up. Transient local errors (5xx, connection) still retry.
+Structured output is set per tier by `PIPEZ_LOCAL_STRUCTURED` (default `json_schema`) and
+`PIPEZ_LOCAL_REASON_STRUCTURED` (default `json_object`): `json_schema` sends
+`response_format` json_schema with `strict: true` (llama.cpp compiles it to a grammar);
+`json_object` sends `response_format: {"type": "json_object"}` and appends the schema to the user
+message; `prompt` sends no `response_format` and appends the schema. The grammar mode suits the
+Qwen-style coder, but gpt-oss-120b degenerates under it (it opens the first long string and never
+closes it, burning all of `max_tokens`), hence `json_object` for the reasoner. In the two
+non-grammar modes a code fence or surrounding prose is tolerated (first `{` to last `}`). All local
+output is validated client-side against the call's schema (`jsonschema`); invalid output raises a
+non-retryable error and the engine escalates, as for a timeout. The mode used is recorded in
+`usage["structured"]` and in the benchmark records.
+Both tiers are health-probed at start; a tier that fails the probe sends its tasks
+to the next tier up. Escalation order is `local`, `local_reason`, `light`, `standard`, `deep`.
+Code tasks never run on a local tier (a plan task with `tier=local` or `local_reason` is coerced
+to `light`, logged as `tier_coerced`). `PIPEZ_LOCAL_STAGES` / `PIPEZ_LOCAL_REASON_STAGES` (comma
+lists of `intake,brief,plan,decide,synthesize`, default empty) list the stages that may
+auto-select each tier; when both allow a stage, `local_reason` is chosen before `local`
+(`config.stage_tier`). With a list empty that tier is used only by an explicit task tier
+override and by the benchmark (`--tiers local_reason@high` works; the effort suffix does not
+change `reasoning_effort`). To decide where to allow it, replay stored runs through the tiers:
 
     python scripts/bench_local.py --db pipez.sqlite3 --runs all --stages intake,brief \
         --tiers local,light,standard --out bench --max-per-stage 2 [--dry-run] [--yes]
 
-It needs `ANTHROPIC_API_KEY` and `PIPEZ_LOCAL_*` in the environment, prints the estimated spend
+It needs `ANTHROPIC_API_KEY` and the `PIPEZ_LOCAL_*` / `PIPEZ_LOCAL_REASON_*` vars of the tiers it uses in the environment, prints the estimated spend
 first and requires `--yes`; the source DB is copied, never modified.
+
+Plan stages also report the deterministic plan gate (`pipez/plangate.py`) on each tier's plan:
+`gate-err` is the mean number of gate errors in the final plan and `ref-err` the same for the
+stored plan that shipped; a gate error is a structural defect (for example a task that neither
+depends on nor restates the interface of a module it consumes) that the engine would send back
+for revision. `--gate-rounds N` (default 0) sends up to N gate-note revision calls on the same
+tier when the first plan has errors (spend estimate multiplied by `1 + N`), adding `pass%`
+(plans with zero errors at the end) and `rounds` (mean rounds used by passing plans); per-result
+`gate_*` fields are in the JSON, with full violations under `--save-outputs`, which also stores `final_output` (the plan after the last gate round, usable as a fixture) and `round_outputs` (round 0 first) next to `output` (round 0).
 
 ## Review fault injection (test hook)
 `PIPEZ_REVIEW_INJECT_WRONG="<substring>"` (off by default, never set in normal use): in review round 1 only, the first verdict whose claim contains the substring (case-insensitive) is overridden to `wrong` with an `INJECTED BY PIPEZ_REVIEW_INJECT_WRONG (test hook)` correction, logged as `review_injected` (`review_inject_miss` if nothing matches) and shown with an `injected` badge. It exercises the fixer -> integrate -> redeploy -> re-review loop on a real run; round 2 is never injected.

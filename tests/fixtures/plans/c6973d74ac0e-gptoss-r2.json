@@ -1,0 +1,269 @@
+{
+ "architecture": "## Architecture\n\n**Components**\n- **Config** (`app/config.py`): Loads environment variables `PIPEZ_PORT` (default 8000) and `PIPEZ_DB_PATH` (default `./data/pipez.db`). Provides a simple dataclass `Config` used by all other components.\n- **Database** (`app/db.py`): Uses SQLite via SQLAlchemy Core. Defines two tables `bills` and `payments` with a schema\u2011version row. Handles DB initialization, session creation, and provides ORM\u2011like model classes `Bill` and `Payment`.\n- **Money** (`app/money.py`): Pure functions to convert between integer cents and formatted US\u2011dollar strings, and to parse user input safely.\n- **Recurrence** (`app/recurrence.py`): Pure date\u2011logic module. Implements `next_due_date(bill, from_date)` and `occurrences_in_month(bill, year, month)` supporting the required intervals, month\u2011end clamping, leap\u2011year handling and one\u2011time bills.\n- **Routes / UI** (`app/main.py`): FastAPI application serving server\u2011rendered HTML with Jinja2 templates. Endpoints for CRUD on bills, marking paid/undo, month view, and payment history. All POST routes validate `Origin`/`Host` headers for minimal CSRF mitigation. Uses the Config, DB, Money and Recurrence modules.\n- **Static assets** (`app/static/`): Classless CSS file (Pico\u2011style) served directly, no external resources.\n- **Templates** (`app/templates/`): Jinja2 HTML templates for the home page, bill form, payment history, etc. Auto\u2011escaped.\n- **Systemd service** (`pipez.service`): Runs the app under an unprivileged `etl`\u2011like user, reads environment variables, starts `uvicorn` from the virtualenv.\n\n**Data Flow**\n1. HTTP request arrives on `0.0.0.0:<port>`.\n2. FastAPI routes (`app/main.py`) parse request, validate CSRF header, and call DB layer for persistence.\n3. Business logic (recurrence, money) is pure and unit\u2011tested.\n4. Responses are rendered with Jinja2 templates, pulling data from the DB.\n5. All writes go through POST endpoints; reads are GET.\n\n**Key Decisions Honoured**\n- **Python\u202f3 + FastAPI** \u2013 all code written in Python 3, FastAPI for routing.\n- **SQLite** \u2013 single file DB, path configurable via env var.\n- **No authentication** \u2013 app is LAN\u2011only; README warns against internet exposure.\n- **Server\u2011rendered HTML** \u2013 Jinja2 templates, classless CSS, no JS frameworks.\n- **Systemd service** \u2013 `pipez.service` provided, runs via `uvicorn`.\n- **Currency** \u2013 amounts stored as integer cents, formatted as `$1,234.56`.\n- **Recurrence options** \u2013 fully implemented in `recurrence.py` with month\u2011end clamping.\n- **Retention** \u2013 payments never deleted; soft\u2011delete flag on bills.\n- **License** \u2013 proprietary `LICENSE` stating all rights reserved.\n- **Testing** \u2013 core\u2011logic tests only, using pytest.\n- **Docs** \u2013 single README covering install, config, systemd setup, backup/restore, LAN warning.\n\n---\n",
+ "stack": [
+  "python3",
+  "fastapi",
+  "uvicorn",
+  "jinja2",
+  "sqlalchemy",
+  "pytest"
+ ],
+ "repo_layout": "- app/\n  - __init__.py\n  - config.py\n  - db.py\n  - money.py\n  - recurrence.py\n  - main.py\n  - templates/\n    - base.html\n    - home.html\n    - bill_form.html\n    - payments.html\n  - static/\n    - style.css\n- tests/\n  - __init__.py\n  - test_recurrence.py\n  - test_money.py\n  - test_mark_paid.py\n- requirements.txt\n- pipez.service\n- README.md\n- LICENSE\n",
+ "modules": [
+  {
+   "name": "config",
+   "path": "app/config.py",
+   "purpose": "Load environment variables with defaults and expose a Config dataclass used by all other modules.",
+   "depends_on": [],
+   "contract": "Public Interface:\n```python\nfrom dataclasses import dataclass\n\n@dataclass(frozen=True)\nclass Config:\n    port: int  # from PIPPEZ_PORT, default 8000\n    db_path: str  # from PIPPEZ_DB_PATH, default ./data/pipez.db\n```\nExports the `Config` class and a module\u2011level `config: Config` instance created at import time.\nOwned Files: `app/config.py`.\nTests: `tests/test_config.py` verifies defaults and env overrides.\n"
+  },
+  {
+   "name": "db",
+   "path": "app/db.py",
+   "purpose": "Initialize SQLite database, define `Bill` and `Payment` tables, provide session helper and schema\u2011version handling.",
+   "depends_on": [
+    "config"
+   ],
+   "contract": "Public Interface:\n```python\nfrom sqlalchemy import Engine\n\ndef get_engine() -> Engine: ...\n\ndef init_db() -> None: ...\n\nclass Bill(Base):\n    __tablename__ = \"bills\"\n    id: int\n    name: str\n    amount_cents: int\n    first_due: date\n    recurrence: str\n    notes: str | None\n    deleted: bool\n    # plus any needed columns\n\nclass Payment(Base):\n    __tablename__ = \"payments\"\n    id: int\n    bill_id: int\n    due_date: date\n    paid_date: date\n    amount_cents: int\n```\nProvides `get_engine()`, `init_db()`, and ORM\u2011like model classes.\nOwned Files: `app/db.py`.\nTests: `tests/test_db_init.py` ensures tables are created and foreign keys enabled.\n"
+  },
+  {
+   "name": "money",
+   "path": "app/money.py",
+   "purpose": "Handle conversion between integer cents and US\u2011dollar formatted strings, and safe parsing of user input.",
+   "depends_on": [],
+   "contract": "Public Interface:\n```python\ndef format_cents(cents: int) -> str: ...\ndef parse_amount(s: str) -> int: ...\n```\n`format_cents` returns strings like `$1,234.56`. `parse_amount` accepts strings like `1234.56` or `$1,234.56` and returns integer cents, raising `ValueError` on invalid input.\nOwned Files: `app/money.py`.\nTests: `tests/test_money.py` covers formatting, parsing, edge cases.\n"
+  },
+  {
+   "name": "recurrence",
+   "path": "app/recurrence.py",
+   "purpose": "Pure date\u2011logic for calculating next due dates and all occurrences of a bill within a given month, respecting clamping rules.",
+   "depends_on": [],
+   "contract": "Public Interface:\n```python\nfrom datetime import date\n\ndef next_due_date(bill: \"Bill\", from_date: date) -> date | None: ...\ndef occurrences_in_month(bill: \"Bill\", year: int, month: int) -> list[date]: ...\n```\n`next_due_date` returns the next due date after `from_date` according to the bill's recurrence, or `None` for one\u2011time bills that are already paid.\n`occurrences_in_month` returns every due date of the bill that falls in the specified month.\nOwned Files: `app/recurrence.py`.\nTests: `tests/test_recurrence.py` covers all interval types, month\u2011end clamping, leap years, and year rollover.\n"
+  },
+  {
+   "name": "routes",
+   "path": "app/main.py",
+   "purpose": "FastAPI application exposing HTML endpoints for CRUD, marking paid/undo, month view, and payment history. Renders Jinja2 templates and uses CSRF header checks.",
+   "depends_on": [
+    "config",
+    "db",
+    "money",
+    "recurrence"
+   ],
+   "contract": "Public Interface:\n```python\nfrom fastapi import FastAPI\napp = FastAPI()\n```\nExports the FastAPI `app` instance. Routes include:\n- `GET /` \u2013 month view\n- `GET /bills/new` & `POST /bills` \u2013 create bill\n- `GET /bills/{id}/edit` & `POST /bills/{id}` \u2013 edit bill\n- `POST /bills/{id}/delete` \u2013 soft\u2011delete\n- `POST /bills/{id}/pay` \u2013 mark paid (or undo via `POST /bills/{id}/undo`)\n- `GET /payments` \u2013 payment history\nAll routes use Jinja2 templates under `app/templates/` and static CSS under `app/static/`.\nOwned Files: `app/main.py`, `app/templates/*`, `app/static/*`.\nTests: Core\u2011logic tests indirectly exercise routes via the DB; UI tests are out of scope.\n"
+  },
+  {
+   "name": "tests",
+   "path": "tests/",
+   "purpose": "Pytest suite covering core logic: recurrence calculations, money formatting/parsing, and mark\u2011paid flow.",
+   "depends_on": [
+    "recurrence",
+    "money",
+    "db"
+   ],
+   "contract": "Public Interface: The test package provides modules `test_recurrence.py`, `test_money.py`, `test_mark_paid.py` each containing pytest functions asserting correct behavior. Tests use an in\u2011memory SQLite database (via `sqlite:///:memory:`) and fixture `init_test_db` that calls `db.init_db()`.\nOwned Files: all files under `tests/`.\nTests: Running `pytest -q` must pass all tests.\n"
+  }
+ ],
+ "tasks": [
+  {
+   "id": "T1",
+   "title": "Implement config module",
+   "module": "config",
+   "prompt": "Create `app/config.py`. Define a frozen dataclass `Config` with fields `port: int` (default 8000) and `db_path: str` (default './data/pipez.db'). On import, read environment variables `PIPEZ_PORT` and `PIPEZ_DB_PATH` (if set) and expose a module\u2011level instance `config`. Add a small pytest `tests/test_config.py` that checks defaults and overrides.\n",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "Importing `app.config` yields a `config` object with `port==8000` when no env var is set.",
+    "Setting `PIPEZ_PORT=9000` before import results in `config.port==9000`.",
+    "`tests/test_config.py` passes with `pytest -q`."
+   ]
+  },
+  {
+   "id": "T2",
+   "title": "Design and implement DB schema and init",
+   "module": "db",
+   "prompt": "Create `app/db.py`. Use SQLAlchemy Core to define tables `bills` and `payments` with appropriate columns (including `deleted` flag on bills). Implement `get_engine()` that reads `config.db_path`, `init_db()` that creates tables if missing, sets PRAGMA foreign_keys=ON, and inserts a schema_version row. Export ORM\u2011like model classes `Bill` and `Payment` (simple dataclasses mapping to rows). Add a pytest `tests/test_db_init.py` that calls `init_db()` on an in\u2011memory DB and asserts tables exist.\n",
+   "tier": "deep",
+   "depends_on": [
+    "T1"
+   ],
+   "acceptance": [
+    "`app.db.init_db()` creates `bills` and `payments` tables with foreign key constraints.",
+    "`tests/test_db_init.py` passes.",
+    "`app.db.get_engine()` returns a SQLAlchemy Engine pointing at the configured path."
+   ]
+  },
+  {
+   "id": "T3",
+   "title": "Implement money formatting and parsing",
+   "module": "money",
+   "prompt": "Create `app/money.py`. Implement `format_cents(cents)` returning a string like `$1,234.56`. Implement `parse_amount(s)` that accepts strings with optional `$` and commas, parses to float, multiplies by 100 and returns int cents, raising `ValueError` on bad input. Add `tests/test_money.py` covering typical, edge, and error cases.\n",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "`format_cents(123456)` returns `$1,234.56`.",
+    "`parse_amount('$1,234.56')` returns `123456`.",
+    "`tests/test_money.py` passes."
+   ]
+  },
+  {
+   "id": "T4",
+   "title": "Implement recurrence logic",
+   "module": "recurrence",
+   "prompt": "Create `app/recurrence.py`. Implement `next_due_date(bill, from_date)` handling all recurrence strings (`one-time`, `weekly`, `biweekly`, `monthly`, `bimonthly`, `quarterly`, `semiannual`, `yearly`). For monthly\u2011style recurrences, clamp to last day of month while anchoring to original day\u2011of\u2011month. Implement `occurrences_in_month(bill, year, month)` returning all due dates of the bill that fall in that month. Add comprehensive tests in `tests/test_recurrence.py` covering each interval, month\u2011end clamping, leap years, and year rollover.\n",
+   "tier": "deep",
+   "depends_on": [],
+   "acceptance": [
+    "`next_due_date` returns correct next date for each interval type.",
+    "`occurrences_in_month` lists all dates for a weekly bill in a given month.",
+    "Month\u2011end clamping works (e.g., 31st -> Feb 28/29).",
+    "`tests/test_recurrence.py` passes."
+   ]
+  },
+  {
+   "id": "T5",
+   "title": "Build FastAPI routes and UI",
+   "module": "routes",
+   "prompt": "Create `app/main.py`. Instantiate `FastAPI()` as `app`. Mount static files at `/static`. Configure Jinja2Templates pointing to `app/templates`. Implement routes described in the architecture, using `db`, `money`, `recurrence`, and `config`. Ensure all POST routes check `Origin`/`Host` header against the request host for basic CSRF mitigation. Use the `format_cents` helper for displaying amounts. Add minimal HTML templates (`base.html`, `home.html`, `bill_form.html`, `payments.html`).\n",
+   "tier": "deep",
+   "depends_on": [
+    "T1",
+    "T2",
+    "T3",
+    "T4"
+   ],
+   "acceptance": [
+    "Running `uvicorn app.main:app` starts the server without errors.",
+    "GET `/` returns a 200 HTML page containing a table of bills for the current month.",
+    "POST `/bills` creates a new bill and redirects to `/`.",
+    "Mark\u2011paid POST advances the bill's due date according to recurrence.",
+    "CSRF header check rejects a POST with mismatched `Host` (testable via curl)."
+   ]
+  },
+  {
+   "id": "T6",
+   "title": "Create classless CSS and basic templates",
+   "module": "routes",
+   "prompt": "Add a `style.css` file under `app/static/` implementing a simple classless stylesheet (e.g., Pico style). Write the four HTML templates referenced by routes, extending `base.html`, linking the CSS, and using Jinja2 syntax to display bills, forms, and payment history. Ensure templates are mobile\u2011friendly.\n",
+   "tier": "light",
+   "depends_on": [
+    "T5"
+   ],
+   "acceptance": [
+    "Templates render without Jinja2 errors.",
+    "The CSS file is served at `/static/style.css` and applied to pages.",
+    "Pages display correctly on a narrow viewport (verified manually)."
+   ]
+  },
+  {
+   "id": "T7",
+   "title": "Write recurrence core\u2011logic tests",
+   "module": "tests",
+   "prompt": "In `tests/test_recurrence.py`, write pytest functions that instantiate a lightweight `Bill` dataclass (matching the DB model) and verify `next_due_date` and `occurrences_in_month` for each recurrence option, including edge cases like 31st \u2192 Feb and leap\u2011year February 29.\n",
+   "tier": "standard",
+   "depends_on": [
+    "T4"
+   ],
+   "acceptance": [
+    "`pytest -q` reports all recurrence tests passing."
+   ]
+  },
+  {
+   "id": "T8",
+   "title": "Write money core\u2011logic tests",
+   "module": "tests",
+   "prompt": "In `tests/test_money.py`, add tests for `format_cents` and `parse_amount` covering normal values, large numbers, negative amounts, and malformed strings raising `ValueError`.\n",
+   "tier": "standard",
+   "depends_on": [
+    "T3"
+   ],
+   "acceptance": [
+    "`pytest -q` reports all money tests passing."
+   ]
+  },
+  {
+   "id": "T9",
+   "title": "Write mark\u2011paid flow tests",
+   "module": "tests",
+   "prompt": "Create `tests/test_mark_paid.py`. Use an in\u2011memory SQLite DB, call `db.init_db()`, insert a sample recurring bill, then simulate a payment by calling the appropriate function from `app.recurrence`/`app.db` that records a `Payment` and updates the bill's next due date. Assert the payment row exists and the bill's due date advanced correctly.\n",
+   "tier": "standard",
+   "depends_on": [
+    "T2",
+    "T4",
+    "T3"
+   ],
+   "acceptance": [
+    "`pytest -q` reports the mark\u2011paid test passing."
+   ]
+  },
+  {
+   "id": "T10",
+   "title": "Write README documentation",
+   "module": "repo_root",
+   "prompt": "Create `README.md` covering: project description, requirements (Python\u202f3, virtualenv), installation steps (create venv, `pip install -r requirements.txt`), configuration via env vars, systemd service installation (`sudo cp pipez.service /etc/systemd/system/`, `systemctl enable --now pipez`), backup/restore of the SQLite file, and a clear LAN\u2011only warning.\n",
+   "tier": "light",
+   "depends_on": [],
+   "acceptance": [
+    "README contains all required sections and matches the architecture decisions."
+   ]
+  },
+  {
+   "id": "T11",
+   "title": "Create systemd service file",
+   "module": "repo_root",
+   "prompt": "Write `pipez.service` that runs as an unprivileged user `etl`, sets `WorkingDirectory` to the repo root, loads environment variables from `/etc/default/pipez` (or inline), executes `ExecStart=/opt/pipez/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $PIPEZ_PORT`. Include `Restart=on-failure`.\n",
+   "tier": "light",
+   "depends_on": [
+    "T1",
+    "T5"
+   ],
+   "acceptance": [
+    "The service file syntax passes `systemd-analyze verify pipez.service`.",
+    "Documentation in README references this file."
+   ]
+  },
+  {
+   "id": "T12",
+   "title": "Add proprietary LICENSE file",
+   "module": "repo_root",
+   "prompt": "Create `LICENSE` containing a statement: \"All rights reserved. No permission is granted to use, copy, modify, or distribute this software.\" Ensure no open\u2011source license identifiers are present.\n",
+   "tier": "light",
+   "depends_on": [],
+   "acceptance": [
+    "LICENSE file exists with the required wording."
+   ]
+  }
+ ],
+ "scaffold_commands": [
+  "python3 -m venv .venv",
+  ".venv/bin/pip install --upgrade pip",
+  ".venv/bin/pip install -r requirements.txt"
+ ],
+ "build_command": ".venv/bin/python -m compileall .",
+ "test_command": ".venv/bin/pytest -q",
+ "deploy": {
+  "target": "vm",
+  "install_commands": [
+   "apt-get update -y",
+   "apt-get install -y python3-venv",
+   "useradd -m -s /usr/sbin/nologin etl || true",
+   "mkdir -p /opt/pipez",
+   "tar -xzf /tmp/pipez.tar.gz -C /opt/pipez",
+   "cd /opt/pipez && python3 -m venv .venv",
+   "/opt/pipez/.venv/bin/pip install -r requirements.txt"
+  ],
+  "start_command": "/opt/pipez/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $PIPEZ_PORT",
+  "port": 8000,
+  "health_path": "/",
+  "env": [
+   {
+    "name": "PIPEZ_PORT",
+    "value": ""
+   },
+   {
+    "name": "PIPEZ_DB_PATH",
+    "value": ""
+   }
+  ]
+ }
+}

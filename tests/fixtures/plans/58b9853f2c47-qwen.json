@@ -1,0 +1,214 @@
+{
+ "architecture": "# Architecture\n\n## Overview\nPipez is a multiplayer board game server (Tic-Tac-Toe and Connect Four) built with plain Node.js and the `ws` library. It serves both the WebSocket API and static client assets (HTML/CSS/JS) on a single HTTP port. The system prioritizes simplicity, local-first operation, and strict server-side authority for game logic.\n\n## Components\n\n1.  **HTTP/WS Server (`src/server`)**: \n    - Uses Node's `http` module to serve static files from `public/`.\n    - Upgrades HTTP connections to WebSockets using `ws`.\n    - Manages the `GameLobby` and `RateLimiter`.\n    - Routes incoming WebSocket messages to the appropriate game handler or lobby handler.\n\n2.  **Game Engine (`src/engine`)**:\n    - Pure logic modules for Tic-Tac-Toe and Connect Four.\n    - Handles board state representation, move validation, win/draw detection.\n    - Contains the Bot AI implementation (Minimax for Hard, heuristic for Medium, random for Easy).\n    - No side effects (I/O or networking).\n\n3.  **Game State Manager (`src/lobby`)**:\n    - Manages active games in memory.\n    - Handles player joining, leaving, and spectator logic.\n    - Generates unique join codes.\n    - Implements grace periods for disconnections and cleanup for abandoned games.\n\n4.  **Persistence Layer (`src/storage`)**:\n    - Wraps `better-sqlite3`.\n    - Stores completed match history (players, winner, moves, timestamps).\n    - Provides read-only access for history retrieval (if needed for UI, though brief implies server-side storage primarily).\n\n5.  **Client (`public/`)**:\n    - Single `index.html` with embedded CSS and JS (or separate files served statically).\n    - Vanilla JS handles WebSocket communication, UI rendering, and user input.\n    - Detects system theme via `prefers-color-scheme`.\n\n## Data Flow\n\n1.  **Connection**: Client connects to `ws://host:port`. Server authenticates rate limits and assigns an ephemeral ID.\n2.  **Lobby**: \n    - *Create*: Client sends `{ type: 'create_game', gameType: 'ttt'|'c4', name: '...' }`. Server generates code, creates game, returns `{ type: 'game_created', code: '...', playerId: '...' }`.\n    - *Join*: Client sends `{ type: 'join_game', code: '...', name: '...' }`. Server validates code, adds player. If 2 players, game starts. If >2, adds as spectator.\n3.  **Gameplay**:\n    - Client sends move intent: `{ type: 'move', cellIndex: 0 }` (TTT) or `{ type: 'move', column: 3 }` (C4).\n    - Server validates move against current state, bot rules, and turn order.\n    - If valid, server updates state, checks for win/draw, and broadcasts `{ type: 'state_update', board: [...], turn: '...' }` to all participants.\n    - If bot's turn, server calculates move internally and broadcasts the bot's move.\n4.  **End Game**: \n    - Server detects win/draw. Saves result to SQLite.\n    - Broadcasts `{ type: 'game_over', winner: '...' }`.\n    - Offers rematch option in UI.\n5.  **Persistence**: On game end, `src/storage` writes the match record. Active games remain in memory until finished or abandoned.\n\n## Key Decisions Honored\n\n-   **No Express**: The server uses `http` and `ws` directly. Static file serving is implemented via `fs` and `path` in the HTTP handler.\n-   **Vanilla Client**: No build step, no frameworks. HTML/CSS/JS are served as static assets.\n-   **Server Authority**: All game logic resides in `src/engine` and `src/lobby`. Clients send intents only.\n-   **SQLite**: `better-sqlite3` is used for synchronous, single-file persistence. No external DB server.\n-   **Rate Limiting**: In-memory tracking of IPs and sockets. Basic thresholds trigger throttling/disconnection.\n-   **Bot AI**: Implemented server-side. Difficulty levels map to different algorithms (Random, Heuristic, Minimax/Alpha-Beta).\n-   **Deployment**: Direct port 3000, no TLS, systemd unit provided.\n-   **Testing**: Node's built-in `node:test` runner. Logic tests are automated; WebSocket flows are manual.\n-   **License**: MIT.\n",
+ "stack": [
+  "Node.js 20+ LTS",
+  "ws (WebSocket library)",
+  "better-sqlite3 (SQLite driver)",
+  "Node.js built-in modules (http, fs, path, crypto, test)"
+ ],
+ "repo_layout": "```\npipez/\n\u251c\u2500\u2500 LICENSE\n\u251c\u2500\u2500 README.md\n\u251c\u2500\u2500 package.json\n\u251c\u2500\u2500 public/\n\u2502   \u251c\u2500\u2500 index.html\n\u2502   \u251c\u2500\u2500 style.css\n\u2502   \u2514\u2500\u2500 app.js\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 server.js          # Entry point: HTTP/WS setup\n\u2502   \u251c\u2500\u2500 lobby.js           # Game lobby, code generation, state management\n\u2502   \u251c\u2500\u2500 engine.js          # Game logic, win detection, bot AI\n\u2502   \u251c\u2500\u2500 storage.js         # SQLite persistence layer\n\u2502   \u2514\u2500\u2500 rate-limiter.js    # In-memory rate limiting\n\u2514\u2500\u2500 tests/\n    \u251c\u2500\u2500 test-engine.js     # Unit tests for game logic and bot\n    \u2514\u2500\u2500 test-lobby.js      # Unit tests for lobby and code generation\n```",
+ "modules": [
+  {
+   "name": "engine",
+   "path": "src/engine.js",
+   "purpose": "Pure logic for Tic-Tac-Toe and Connect Four, including move validation, win/draw detection, and bot AI.",
+   "depends_on": [],
+   "contract": "Public Interface:\n- `createBoard(gameType)`: Returns initial board state.\n- `isValidMove(state, player, move)`: Checks if move is legal.\n- `applyMove(state, player, move)`: Returns new state after move.\n- `checkWin(state, player)`: Returns true if player has won.\n- `checkDraw(state)`: Returns true if game is a draw.\n- `getBotMove(state, difficulty, player)`: Returns bot's move object.\n\nFiles Owned:\n- `src/engine.js`\n\nTesting:\n- `tests/test-engine.js`: Unit tests for all public functions. Covers TTT and C4 boards, win conditions, draw conditions, and bot move legality for all difficulties."
+  },
+  {
+   "name": "lobby",
+   "path": "src/lobby.js",
+   "purpose": "Manages active games, player connections, spectator logic, and join code generation.",
+   "depends_on": [
+    "engine"
+   ],
+   "contract": "Public Interface:\n- `createGame(gameType, playerName)`: Creates a new game, returns `{ code, gameId }`.\n- `joinGame(code, playerName, socketId)`: Joins a game as player or spectator. Returns `{ role, gameId }` or error.\n- `getGameState(gameId)`: Returns current game state for broadcasting.\n- `removePlayer(gameId, socketId)`: Handles disconnection, updates state.\n- `cleanupAbandonedGames()`: Removes games with no players after 10 mins.\n\nFiles Owned:\n- `src/lobby.js`\n\nTesting:\n- `tests/test-lobby.js`: Unit tests for code generation uniqueness, game creation, joining logic (player vs spectator), and player removal."
+  },
+  {
+   "name": "storage",
+   "path": "src/storage.js",
+   "purpose": "Persistently stores completed match history in SQLite.",
+   "depends_on": [],
+   "contract": "Public Interface:\n- `init(dbPath)`: Initializes the database connection and schema.\n- `saveMatch(matchData)`: Saves a completed match record.\n- `getHistory(limit)`: Retrieves recent match history.\n\nFiles Owned:\n- `src/storage.js`\n\nTesting:\n- `tests/test-storage.js`: Tests database initialization, saving a match, and retrieving history. Verifies data integrity."
+  },
+  {
+   "name": "rate-limiter",
+   "path": "src/rate-limiter.js",
+   "purpose": "In-memory rate limiting for connections, messages, and join attempts.",
+   "depends_on": [],
+   "contract": "Public Interface:\n- `checkConnection(ip)`: Returns true if IP is allowed to connect.\n- `checkMessage(socketId)`: Returns true if socket is allowed to send a message.\n- `checkJoinAttempt(ip)`: Returns true if IP is allowed to attempt a join.\n- `recordActivity(ip, socketId)`: Updates counters.\n\nFiles Owned:\n- `src/rate-limiter.js`\n\nTesting:\n- `tests/test-rate-limiter.js`: Tests threshold enforcement, reset logic, and IP/socket tracking."
+  },
+  {
+   "name": "server",
+   "path": "src/server.js",
+   "purpose": "Entry point. Sets up HTTP server for static files and WebSocket upgrades. Integrates lobby, engine, storage, and rate-limiter.",
+   "depends_on": [
+    "lobby",
+    "engine",
+    "storage",
+    "rate-limiter"
+   ],
+   "contract": "Public Interface:\n- `start(port)`: Starts the HTTP/WS server on the given port.\n\nFiles Owned:\n- `src/server.js`\n\nTesting:\n- Manual testing via README checklist. No automated unit tests for server integration due to WebSocket complexity, but logic is covered by other modules."
+  },
+  {
+   "name": "client",
+   "path": "public/",
+   "purpose": "Vanilla HTML/CSS/JS client for game interaction.",
+   "depends_on": [],
+   "contract": "Files Owned:\n- `public/index.html`\n- `public/style.css`\n- `public/app.js`\n\nTesting:\n- Manual testing via README checklist. Verifies UI responsiveness, theme switching, and game flow."
+  }
+ ],
+ "tasks": [
+  {
+   "id": "T1",
+   "title": "Setup Project Structure and Dependencies",
+   "module": "server",
+   "prompt": "Initialize the Node.js project. Create `package.json` with MIT license, dependencies (`ws`, `better-sqlite3`), and scripts. Create the directory structure (`src/`, `public/`, `tests/`). Create a basic `README.md` with run instructions and manual test checklist.",
+   "tier": "light",
+   "depends_on": [],
+   "acceptance": [
+    "`package.json` exists with correct dependencies and license.",
+    "Directory structure matches repo layout.",
+    "`README.md` contains run instructions and manual test checklist."
+   ]
+  },
+  {
+   "id": "T2",
+   "title": "Implement Game Engine Logic",
+   "module": "engine",
+   "prompt": "Implement `src/engine.js` with pure functions for Tic-Tac-Toe and Connect Four. Include board creation, move validation, win/draw detection, and bot AI (random, heuristic, minimax). Write unit tests in `tests/test-engine.js`.",
+   "tier": "deep",
+   "depends_on": [],
+   "acceptance": [
+    "`src/engine.js` exports `createBoard`, `isValidMove`, `applyMove`, `checkWin`, `checkDraw`, `getBotMove`.",
+    "Unit tests pass for TTT and C4 logic, including win/draw conditions.",
+    "Bot moves are legal and respect difficulty levels."
+   ]
+  },
+  {
+   "id": "T3",
+   "title": "Implement Rate Limiter",
+   "module": "rate-limiter",
+   "prompt": "Implement `src/rate-limiter.js` with in-memory tracking for IP connections, message rates, and join attempts. Define thresholds and implement throttling/disconnection logic. Write unit tests in `tests/test-rate-limiter.js`.",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "`src/rate-limiter.js` exports `checkConnection`, `checkMessage`, `checkJoinAttempt`, `recordActivity`.",
+    "Unit tests verify threshold enforcement and reset logic.",
+    "Rate limiter correctly identifies and blocks excessive requests."
+   ]
+  },
+  {
+   "id": "T4",
+   "title": "Implement Storage Layer",
+   "module": "storage",
+   "prompt": "Implement `src/storage.js` using `better-sqlite3`. Create schema for match history. Implement `init`, `saveMatch`, and `getHistory`. Write unit tests in `tests/test-storage.js`.",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "`src/storage.js` exports `init`, `saveMatch`, `getHistory`.",
+    "Unit tests verify database initialization, saving, and retrieval.",
+    "SQLite file is created and populated correctly."
+   ]
+  },
+  {
+   "id": "T5",
+   "title": "Implement Lobby and Game State Management",
+   "module": "lobby",
+   "prompt": "Implement `src/lobby.js` to manage active games. Handle game creation, joining (player/spectator), disconnection, and cleanup. Integrate with `engine` for state updates. Write unit tests in `tests/test-lobby.js`.",
+   "tier": "deep",
+   "depends_on": [
+    "T2"
+   ],
+   "acceptance": [
+    "`src/lobby.js` exports `createGame`, `joinGame`, `getGameState`, `removePlayer`, `cleanupAbandonedGames`.",
+    "Unit tests verify game creation, joining logic, and player removal.",
+    "Lobby correctly handles spectator addition and game state broadcasting."
+   ]
+  },
+  {
+   "id": "T6",
+   "title": "Implement Client UI (HTML/CSS/JS)",
+   "module": "client",
+   "prompt": "Create `public/index.html`, `public/style.css`, and `public/app.js`. Implement UI for lobby (create/join), game board, and game-over screens. Handle WebSocket communication, theme switching, and bot interaction. No external dependencies.",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "Client files exist in `public/`.",
+    "UI displays lobby, game board, and game-over screens.",
+    "Theme switches based on `prefers-color-scheme`.",
+    "Client sends correct WebSocket messages and updates UI accordingly."
+   ]
+  },
+  {
+   "id": "T7",
+   "title": "Implement Server Entry Point and Integration",
+   "module": "server",
+   "prompt": "Implement `src/server.js`. Set up HTTP server to serve static files from `public/`. Upgrade connections to WebSockets. Integrate `lobby`, `engine`, `storage`, and `rate-limiter`. Handle WebSocket message routing and broadcasting.",
+   "tier": "deep",
+   "depends_on": [
+    "T3",
+    "T4",
+    "T5",
+    "T6"
+   ],
+   "acceptance": [
+    "`src/server.js` starts HTTP/WS server on configurable port.",
+    "Static files are served correctly.",
+    "WebSocket messages are routed to lobby/engine.",
+    "Rate limiting is applied to connections and messages.",
+    "Game state updates are broadcast to clients."
+   ]
+  },
+  {
+   "id": "T8",
+   "title": "Final Integration and Manual Testing",
+   "module": "server",
+   "prompt": "Run the application locally. Perform manual testing according to the README checklist. Verify lobby, game play, bot interaction, spectator mode, and persistence. Fix any integration issues.",
+   "tier": "light",
+   "depends_on": [
+    "T7"
+   ],
+   "acceptance": [
+    "Application starts without errors.",
+    "Manual test checklist items pass.",
+    "Game flow works end-to-end (create, join, play, end, save).",
+    "Bot plays correctly at all difficulties.",
+    "Spectators see live updates."
+   ]
+  }
+ ],
+ "scaffold_commands": [
+  "mkdir -p pipez/src pipez/public pipez/tests",
+  "cd pipez",
+  "npm init -y",
+  "npm install ws better-sqlite3",
+  "npm install --save-dev node:test"
+ ],
+ "build_command": "node --test tests/**/*.js",
+ "test_command": "node --test tests/**/*.js",
+ "deploy": {
+  "target": "vm",
+  "install_commands": [
+   "sudo apt-get update && sudo apt-get install -y nodejs npm sqlite3",
+   "sudo useradd -m etl",
+   "sudo mkdir -p /opt/pipez",
+   "sudo tar -xzf pipez.tar.gz -C /opt/pipez --strip-components=1",
+   "sudo chown -R etl:etl /opt/pipez",
+   "cd /opt/pipez && sudo -u etl npm install --production"
+  ],
+  "start_command": "cd /opt/pipez && node src/server.js",
+  "port": 3000,
+  "health_path": "/health",
+  "env": [
+   {
+    "name": "PORT",
+    "value": ""
+   },
+   {
+    "name": "DB_PATH",
+    "value": ""
+   }
+  ]
+ }
+}

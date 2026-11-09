@@ -1,0 +1,4 @@
+prompt chars 11766
+effort=low max=16000: 409s finish=length completion_tokens=16000 reasoning_chars=216 content_chars=35815 tasks=parse-fail:Unterminated string starting at: line 2  modules=parse-fail:Unterminated string starting at: line 2  arch_chars=parse-fail:Unterminated string starting at: line 2 
+effort=medium max=40000: 1397s finish=length completion_tokens=40000 reasoning_chars=3166 content_chars=179586 tasks=parse-fail:Unterminated string starting at: line 2  modules=parse-fail:Unterminated string starting at: line 2  arch_chars=parse-fail:Unterminated string starting at: line 2 
+rc=0

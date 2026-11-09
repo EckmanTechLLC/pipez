@@ -1,0 +1,255 @@
+{
+ "architecture": "The service consists of a FastAPI application that renders all pages with Jinja2 templates and serves static assets (Pico CSS and two generated Pygments style sheets). Configuration is read directly from the process environment (PIPEZ_HOST, PIPEZ_PORT, PIPEZ_DB_PATH) with sensible defaults, satisfying the env\u2011file requirement. A lightweight SQLite database (accessed via the stdlib `sqlite3` module) stores pastes with columns `id`, `content`, `language`, `created_at`, `expires_at`. The DB is opened in WAL mode and the schema is created on first start. Paste IDs are URL\u2011safe tokens generated with `secrets.token_urlsafe(8)`; collisions are retried. Content size is limited to 512\u202fKiB and empty submissions are rejected with a 4xx HTML page. Expiry handling is two\u2011fold: every read checks `expires_at` against the current UTC epoch and returns 404 if the paste is expired; a background asyncio task runs at startup and then every 60\u202fseconds to delete rows whose expiry time has passed. Highlighting uses Pygments: the selected lexer (or auto\u2011detect via `guess_lexer`) produces HTML with `HtmlFormatter` (line numbers, CSS classes). Two static CSS files are generated from the `default` and `monokai` styles, the latter scoped under a `@media (prefers-color-scheme: dark)` rule to provide automatic light/dark theming. The UI is built with locally vendored Pico CSS, avoiding any CDN. The whole application runs under a dedicated non\u2011root user as a systemd service (`deploy/pipez.service`) invoking `uvicorn` from the repository\u2011local virtual environment. Logging is left to uvicorn\u2019s stdout/stderr so journald captures it. The repository contains only local source, a MIT LICENSE placeholder, a README with install/upgrade instructions, a `.gitignore`, an example env file, and a minimal `pyproject.toml`/`requirements.txt`. Tests are written with pytest and FastAPI\u2019s `TestClient`, using a temporary SQLite file to verify creation, viewing, highlighting, expiry handling, size limits, and HTML escaping.",
+ "stack": [
+  "Python",
+  "FastAPI",
+  "Uvicorn",
+  "SQLite",
+  "Jinja2",
+  "Pygments",
+  "Pico CSS",
+  "pytest"
+ ],
+ "repo_layout": "pipez/\n\u251c\u2500\u2500 main.py            # FastAPI app, routes, startup events\n\u251c\u2500\u2500 config.py          # environment configuration loader\n\u251c\u2500\u2500 db.py              # SQLite wrapper, schema, CRUD, purge task\n\u251c\u2500\u2500 highlight.py       # lexer selection and HTML generation\n\u251c\u2500\u2500 static/\n\u2502   \u251c\u2500\u2500 pico.min.css   # vendored Pico CSS\n\u2502   \u251c\u2500\u2500 pygments_light.css   # generated from Pygments default style\n\u2502   \u2514\u2500\u2500 pygments_dark.css    # generated from Pygments monokai style (dark media query)\n\u251c\u2500\u2500 templates/\n\u2502   \u251c\u2500\u2500 base.html\n\u2502   \u251c\u2500\u2500 index.html\n\u2502   \u251c\u2500\u2500 paste.html\n\u2502   \u2514\u2500\u2500 error.html\n\u251c\u2500\u2500 requirements.txt   # runtime dependencies\n\u251c\u2500\u2500 pyproject.toml     # optional build metadata\n\u251c\u2500\u2500 README.md\n\u251c\u2500\u2500 LICENSE\n\u251c\u2500\u2500 pipez.env.example\n\u251c\u2500\u2500 deploy/\n\u2502   \u2514\u2500\u2500 pipez.service  # systemd unit file\n\u2514\u2500\u2500 tests/\n    \u251c\u2500\u2500 conftest.py\n    \u2514\u2500\u2500 test_app.py",
+ "modules": [
+  {
+   "name": "config",
+   "path": "pipez/config.py",
+   "purpose": "Load configuration from environment variables with defaults; expose a Config dataclass for the rest of the code.",
+   "depends_on": [],
+   "contract": "Exports a `Config` dataclass with fields `host: str`, `port: int`, `db_path: str`. Provides a function `load_config() -> Config` that reads `os.environ['PIPEZ_HOST']`, `PIPEZ_PORT`, `PIPEZ_DB_PATH` falling back to defaults `0.0.0.0`, `8000`, `./pipez.db`. No external libraries are used. Unit tests verify default values and that environment overrides are respected."
+  },
+  {
+   "name": "db",
+   "path": "pipez/db.py",
+   "purpose": "Encapsulate SQLite access, schema creation, CRUD for pastes, and expired\u2011paste purging.",
+   "depends_on": [
+    "config"
+   ],
+   "contract": "Class `DB` initialized with a `Config` instance. Methods:\n- `init()`: opens connection, sets WAL mode, creates `pastes` table if missing.\n- `create_paste(id: str, content: str, language: str, created_at: int, expires_at: Optional[int]) -> None` inserts a row using parameterized queries.\n- `get_paste(id: str) -> Optional[dict]` returns a dict with keys matching columns if the paste exists and is not expired; otherwise returns None.\n- `delete_expired() -> int` removes rows where `expires_at` is not NULL and <= current UTC epoch, returns number deleted.\n- `close()`: closes the connection.\nAll timestamps are stored as integer epoch seconds. Tests cover insertion, retrieval, expiry filtering, and WAL activation."
+  },
+  {
+   "name": "highlight",
+   "path": "pipez/highlight.py",
+   "purpose": "Select a Pygments lexer (including auto\u2011detect) and render highlighted HTML with line numbers and CSS classes.",
+   "depends_on": [],
+   "contract": "Functions:\n- `select_lexer(language: str, content: str) -> Lexer` returns a Pygments lexer. If `language` is \"auto\" or unknown, attempts `guess_lexer(content)` and falls back to `TextLexer`.\n- `format_code(content: str, lexer: Lexer) -> str` returns HTML generated by `HtmlFormatter(linenos=True, cssclass=\"code\")`.\nBoth functions never mark user content as safe; they rely on Jinja2 auto\u2011escaping. Tests verify that known languages produce expected CSS class names, auto\u2011detect works, and unknown languages fall back to plain text."
+  },
+  {
+   "name": "routes",
+   "path": "pipez/main.py",
+   "purpose": "Define FastAPI endpoints, render templates, handle form submissions, and register background tasks.",
+   "depends_on": [
+    "config",
+    "db",
+    "highlight"
+   ],
+   "contract": "Exports a FastAPI `app` instance with the following routes:\n- `GET /` renders `index.html` containing a textarea, language select (auto + all Pygments lexers), expiry select (10\u202fmin, 1\u202fh, 1\u202fday, never) and a submit button.\n- `POST /` validates non\u2011empty content \u2264 512\u202fKiB, generates a unique ID, stores the paste via `DB.create_paste`, and redirects (303) to `/p/{id}`.\n- `GET /p/{id}` retrieves the paste via `DB.get_paste`; if missing or expired returns a 404 rendered with `error.html`. Otherwise renders `paste.html` with highlighted HTML from `highlight.format_code`, showing language, creation time, and expiry info.\n- Startup event registers the purge background task from `background.start_purge_task`.\nAll responses are HTML; static files are served from `/static`. Tests use FastAPI `TestClient` to verify each endpoint's behavior, including size limits and expiry handling."
+  },
+  {
+   "name": "background",
+   "path": "pipez/background.py",
+   "purpose": "Run an asynchronous task that deletes expired pastes every 60 seconds and once at startup.",
+   "depends_on": [
+    "db"
+   ],
+   "contract": "Provides function `register_purge_task(app: FastAPI, db: DB) -> None` which adds a FastAPI `startup` event that calls `db.delete_expired()` immediately and then schedules an `asyncio.create_task(purge_loop())`. The `purge_loop` sleeps 60\u202fseconds between calls to `db.delete_expired()`. Tests mock the DB to ensure the loop invokes `delete_expired` at the expected interval."
+  }
+ ],
+ "tasks": [
+  {
+   "id": "T1",
+   "title": "Implement configuration loader",
+   "module": "config",
+   "prompt": "Create `pipez/config.py` with a `Config` dataclass and a `load_config()` function that reads PIPEZ_HOST, PIPEZ_PORT, PIPEZ_DB_PATH from `os.environ` and falls back to defaults (0.0.0.0, 8000, ./pipez.db). No external libraries. Add unit tests verifying defaults and env overrides.",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "Config defaults match the specification.",
+    "Environment variables override defaults correctly.",
+    "Unit tests pass."
+   ]
+  },
+  {
+   "id": "T2",
+   "title": "Build SQLite DB wrapper",
+   "module": "db",
+   "prompt": "Create `pipez/db.py` defining a `DB` class that uses the `Config` from T1. Implement `init()` to open a connection, enable WAL, and create the `pastes` table if missing. Implement `create_paste`, `get_paste`, `delete_expired`, and `close` using parameterized queries and integer epoch timestamps. Add tests for insertion, retrieval, expiry filtering, and WAL mode.",
+   "tier": "deep",
+   "depends_on": [
+    "T1"
+   ],
+   "acceptance": [
+    "Database file is created and schema matches the brief.",
+    "WAL mode is enabled.",
+    "Inserted pastes can be retrieved before expiry.",
+    "Expired pastes are not returned by `get_paste`.",
+    "`delete_expired` removes only expired rows.",
+    "All DB tests pass."
+   ]
+  },
+  {
+   "id": "T3",
+   "title": "Implement highlighting utilities",
+   "module": "highlight",
+   "prompt": "Create `pipez/highlight.py` with `select_lexer(language, content)` that returns a Pygments lexer (auto\u2011detect via `guess_lexer` when needed) and falls back to `TextLexer`. Implement `format_code(content, lexer)` that returns HTML using `HtmlFormatter(linenos=True, cssclass=\"code\")`. Add tests for known languages, auto\u2011detect, and fallback behavior.",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "Known language selection returns the correct lexer.",
+    "Auto\u2011detect works for sample code.",
+    "Unknown language falls back to plain text.",
+    "HTML output contains line numbers and CSS class \"code\".",
+    "Highlight tests pass."
+   ]
+  },
+  {
+   "id": "T4",
+   "title": "Create FastAPI routes and templates",
+   "module": "routes",
+   "prompt": "Create `pipez/main.py` that builds a FastAPI `app`. Implement GET `/` rendering `templates/index.html` with a textarea, language select (auto + all Pygments lexers), expiry select (10\u202fmin, 1\u202fh, 1\u202fday, never, default 1\u202fday). Implement POST `/` that validates content size (\u2264512\u202fKiB, non\u2011empty), generates a unique 8\u2011char URL\u2011safe ID (retry on collision), stores the paste via `DB.create_paste`, and redirects (303) to `/p/{id}`. Implement GET `/p/{id}` that fetches the paste via `DB.get_paste`; on miss or expiry returns 404 with `templates/error.html`. Otherwise render `templates/paste.html` showing highlighted HTML from `highlight.format_code`, language, creation time, and expiry info. Register the background purge task from module `background`. Add tests using FastAPI `TestClient` covering all routes, size limits, expiry handling, and HTML escaping.",
+   "tier": "deep",
+   "depends_on": [
+    "T1",
+    "T2",
+    "T3"
+   ],
+   "acceptance": [
+    "GET / returns a 200 page containing the form with required fields.",
+    "POST / with valid data redirects (303) to /p/{id}.",
+    "Created paste is viewable at /p/{id} with highlighted code and correct metadata.",
+    "Empty or oversized submissions return a 4xx HTML error page.",
+    "Expired paste returns a 404 page.",
+    "All route tests pass."
+   ]
+  },
+  {
+   "id": "T5",
+   "title": "Add background expiry purge task",
+   "module": "background",
+   "prompt": "Create `pipez/background.py` with `register_purge_task(app, db)` that adds a FastAPI startup event calling `db.delete_expired()` immediately and starts an async loop that sleeps 60\u202fseconds then calls `db.delete_expired()` repeatedly. Ensure the task is cancelled on shutdown. Add a test that mocks `DB.delete_expired` and verifies it is called at least twice within a short simulated period.",
+   "tier": "standard",
+   "depends_on": [
+    "T2"
+   ],
+   "acceptance": [
+    "Background task runs on startup and every 60 seconds.",
+    "Mocked test confirms `delete_expired` is invoked as expected.",
+    "No unhandled exceptions on shutdown."
+   ]
+  },
+  {
+   "id": "T6",
+   "title": "Generate static assets (Pico CSS & Pygments styles)",
+   "module": "static",
+   "prompt": "Copy the minified Pico CSS file into `pipez/static/pico.min.css`. Write a small script `generate_pygments_css.py` that uses Pygments to write `pipez/static/pygments_light.css` (style \"default\") and `pipez/static/pygments_dark.css` (style \"monokai\") with the dark stylesheet wrapped in `@media (prefers-color-scheme: dark) { ... }`. Ensure the script is runnable via `python generate_pygments_css.py`. Add a test that the generated files exist and contain the expected CSS class prefix.",
+   "tier": "light",
+   "depends_on": [],
+   "acceptance": [
+    "Pico CSS file is present in the static directory.",
+    "Both Pygments CSS files are generated and contain the string \"code\" class.",
+    "Dark stylesheet is wrapped in a media query."
+   ]
+  },
+  {
+   "id": "T7",
+   "title": "Write pytest suite for the application",
+   "module": "tests",
+   "prompt": "Create `tests/conftest.py` that provides a fixture `temp_db_path` (tempfile) and a fixture `app` that loads config pointing to the temp DB, initializes `DB`, registers the purge task, and returns the FastAPI `app`. Write `tests/test_app.py` covering: creating a paste with each expiry option, viewing it before expiry, confirming 404 after simulated expiry (by adjusting DB directly), never\u2011expiring paste stays accessible, unknown ID returns 404, empty and oversized submissions are rejected, and that script tags in content are escaped in the rendered HTML. Use FastAPI `TestClient` and manipulate the DB timestamps where needed.",
+   "tier": "standard",
+   "depends_on": [
+    "T1",
+    "T2",
+    "T3",
+    "T4",
+    "T5"
+   ],
+   "acceptance": [
+    "All tests in `tests/` pass with `pytest -q`.",
+    "Coverage includes creation, viewing, expiry, size limits, and HTML escaping."
+   ]
+  },
+  {
+   "id": "T8",
+   "title": "Create README and LICENSE placeholders",
+   "module": "docs",
+   "prompt": "Add `README.md` with sections: Overview, Installation (clone, create venv, `pip install -r requirements.txt`, copy `pipez.env.example` to `pipez.env`, install systemd unit), Configuration (environment variables), Running (systemctl commands), Upgrade, Security note (LAN\u2011only), and License. Add `LICENSE` containing the MIT license text with a placeholder for the copyright holder. Ensure both files are tracked.",
+   "tier": "light",
+   "depends_on": [],
+   "acceptance": [
+    "README contains all required sections and matches the brief.",
+    "LICENSE file is present with MIT text."
+   ]
+  },
+  {
+   "id": "T9",
+   "title": "Add packaging files (requirements.txt & pyproject.toml)",
+   "module": "packaging",
+   "prompt": "Create `requirements.txt` listing `fastapi`, `uvicorn[standard]`, `jinja2`, `pygments`, `python-multipart`. Create a minimal `pyproject.toml` with `[project]` name \"pipez\", version \"0.1.0\", license \"MIT\", and `dependencies` matching the requirements. Ensure `pip install -e .` works.",
+   "tier": "light",
+   "depends_on": [],
+   "acceptance": [
+    "Running `pip install -e .` installs all dependencies without errors.",
+    "`pip list` shows the project in editable mode."
+   ]
+  },
+  {
+   "id": "T10",
+   "title": "Create systemd service unit",
+   "module": "deploy",
+   "prompt": "Add `deploy/pipez.service` with `User=etl`, `Group=etl`, `WorkingDirectory=/opt/pipez`, `EnvironmentFile=/opt/pipez/pipez.env`, `ExecStart=/opt/pipez/venv/bin/uvicorn pipez.main:app --host $PIPEZ_HOST --port $PIPEZ_PORT`, `Restart=on-failure`, `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ReadWritePaths=/opt/pipez` (to allow DB writes). Ensure the unit file syntax is correct.",
+   "tier": "light",
+   "depends_on": [],
+   "acceptance": [
+    "systemd unit file parses without errors (`systemd-analyze verify`).",
+    "ExecStart command matches the brief."
+   ]
+  },
+  {
+   "id": "T11",
+   "title": "Scaffold repository and install toolchain",
+   "module": "scaffold",
+   "prompt": "Provide the minimal commands to create the git repo, a Python virtual environment, and install dependencies: `git init .`, `python3 -m venv venv`, `source venv/bin/activate`, `pip install -r requirements.txt`. These commands are run once before any other task.",
+   "tier": "light",
+   "depends_on": [],
+   "acceptance": [
+    "Running the scaffold commands creates a usable virtual environment with all packages installed."
+   ]
+  }
+ ],
+ "scaffold_commands": [
+  "git init .",
+  "python3 -m venv venv",
+  "source venv/bin/activate && pip install -r requirements.txt"
+ ],
+ "build_command": "pip install -e .",
+ "test_command": "pytest -q",
+ "deploy": {
+  "target": "vm",
+  "install_commands": [
+   "sudo apt-get update -y",
+   "sudo apt-get install -y python3-venv python3-pip",
+   "sudo mkdir -p /opt/pipez",
+   "sudo chown etl:etl /opt/pipez",
+   "cd /opt/pipez && python3 -m venv venv",
+   "source /opt/pipez/venv/bin/activate && pip install -r /opt/pipez/requirements.txt"
+  ],
+  "start_command": "/opt/pipez/venv/bin/uvicorn pipez.main:app --host $PIPEZ_HOST --port $PIPEZ_PORT",
+  "port": 8000,
+  "health_path": "/",
+  "env": [
+   {
+    "name": "PIPEZ_HOST",
+    "value": ""
+   },
+   {
+    "name": "PIPEZ_PORT",
+    "value": ""
+   },
+   {
+    "name": "PIPEZ_DB_PATH",
+    "value": ""
+   }
+  ]
+ }
+}

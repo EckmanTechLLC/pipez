@@ -1,0 +1,23 @@
+not retrying: response truncated at max_tokens=16000 (local: 382s, 16000 output tokens)
+not retrying: response truncated at max_tokens=16000 (local: 589s, 16000 output tokens)
+not retrying: response truncated at max_tokens=16000 (local: 386s, 16000 output tokens)
+not retrying: response truncated at max_tokens=16000 (local: 375s, 16000 output tokens)
+not retrying: response truncated at max_tokens=16000 (local: 424s, 16000 output tokens)
+plan: plan   run 883909b06334  prompt 11247 chars  tiers local_reason  est $0.0000
+plan: plan   run 58b9853f2c47  prompt 11789 chars  tiers local_reason  est $0.0000
+plan: plan   run c7213225e46a  prompt 11766 chars  tiers local_reason  est $0.0000
+plan: plan   run 60cd5166f16a  prompt 12202 chars  tiers local_reason  est $0.0000
+plan: plan   run c6973d74ac0e  prompt 11771 chars  tiers local_reason  est $0.0000
+calls: 5   estimated spend: $0.0000 (local is free but ~9 tok/s)
+  plan 883909b06334 local_reason ok=False 381.7s
+  plan 58b9853f2c47 local_reason ok=False 588.5s
+  plan c7213225e46a local_reason ok=False 386.2s
+  plan 60cd5166f16a local_reason ok=False 374.7s
+  plan c6973d74ac0e local_reason ok=False 424.2s
+
+| stage | tier | n | ok% | p50 s | mean $ | mean out-tok | tasks | Δtasks | deploy-match% | forbidden% |
+|---|---|---|---|---|---|---|---|---|---|---|
+| plan | local_reason | 5 | 0 | 386.2 | 0.0000 | - | - | - | - | - |
+
+wrote /tmp/claude-1000/-home-etl-projects-pipez/da67daff-717b-431c-aaf0-b7dcbbb0d8fb/scratchpad/bench/out30/bench-20261106-142629.json
+bench exited rc=0

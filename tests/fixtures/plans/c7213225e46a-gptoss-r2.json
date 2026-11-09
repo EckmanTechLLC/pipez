@@ -1,0 +1,299 @@
+{
+ "architecture": "The service consists of a thin Express HTTP layer (app) that wires middleware (rate limiting, JSON body parsing, trust\u2011proxy handling) and routes (router). The router implements three endpoints: POST /shorten, GET /:code, GET /healthz. Business logic is delegated to helper modules: `codeGenerator` creates random 7\u2011character base62 strings with collision retry; `db` wraps a single SQLite file (better\u2011sqlite3) with a schema `links(code TEXT PRIMARY KEY, url TEXT NOT NULL, created_at INTEGER NOT NULL)` and runs in WAL mode. `rateLimiter` configures `express-rate-limit` to enforce 60 requests per minute per client IP, returning 429 with `Retry\u2011After`. Configuration values (PORT, DB_PATH, BASE_URL, TRUST_PROXY) are read once by the `config` module and exported as a plain object. The `server` module is the entry point that calls `app.listen` using the configured port. All components are pure Node.js with only the declared dependencies (express, express-rate-limit, better-sqlite3). Docker builds a minimal Node LTS Alpine image, installs only production dependencies, creates a non\u2011root user, declares `VOLUME /data`, exposes port 3000, and runs `node src/server.js`. No telemetry, no external calls, and the MIT license is applied throughout. The README documents environment variables, Docker usage, and example curl commands. The test suite uses the built\u2011in `node:test` runner with `supertest` against an in\u2011memory SQLite DB to verify shortening, redirection, validation, rate limiting, and error handling.",
+ "stack": [
+  "Node.js",
+  "Express",
+  "better-sqlite3",
+  "express-rate-limit",
+  "Docker",
+  "npm"
+ ],
+ "repo_layout": "- .gitignore\n- Dockerfile\n- .dockerignore\n- docker-compose.yml\n- LICENSE\n- README.md\n- package.json\n- src/\n  - config.js\n  - db.js\n  - codeGenerator.js\n  - rateLimiter.js\n  - router.js\n  - app.js\n  - server.js\n- test/\n  - shortener.test.js",
+ "modules": [
+  {
+   "name": "config",
+   "path": "src/config.js",
+   "purpose": "Read environment variables, provide defaults, and export a typed configuration object used by all other modules.",
+   "depends_on": [],
+   "contract": "Exports a constant `config` with properties: `port` (number, default 3000), `dbPath` (string, default '/data/shortener.db'), `baseUrl` (string | undefined), `trustProxy` (boolean|string|number|array, default false). No side effects. Owned file: src/config.js. Tested by unit test that sets process.env and verifies exported values."
+  },
+  {
+   "name": "db",
+   "path": "src/db.js",
+   "purpose": "Initialize the SQLite database, ensure schema exists, and provide CRUD functions for short links.",
+   "depends_on": [
+    "config"
+   ],
+   "contract": "Exports functions: `init()` (creates DB connection, sets WAL mode, creates `links` table if missing), `insertLink(code:string, url:string, createdAt:number): void`, `findUrlByCode(code:string): string|undefined`. Throws on DB errors. Owned file: src/db.js. Tested with an in\u2011memory SQLite DB by calling `init` then CRUD functions."
+  },
+  {
+   "name": "codeGenerator",
+   "path": "src/codeGenerator.js",
+   "purpose": "Generate a unique 7\u2011character base62 code, retrying up to 5 times on collision.",
+   "depends_on": [
+    "db"
+   ],
+   "contract": "Exports async function `generateUniqueCode(): Promise<string>` that returns a 7\u2011char string. Internally uses `crypto.randomInt` to build a base62 string, checks uniqueness via `db.findUrlByCode`, retries up to 5 times, and throws if all attempts fail. Owned file: src/codeGenerator.js. Tested by mocking `db.findUrlByCode` to simulate collisions and success."
+  },
+  {
+   "name": "rateLimiter",
+   "path": "src/rateLimiter.js",
+   "purpose": "Configure and export an Express middleware that limits each client IP to 60 requests per minute.",
+   "depends_on": [
+    "config"
+   ],
+   "contract": "Exports a middleware `rateLimiter` created with `express-rate-limit` using a window of 60 seconds, max 60, standard rate\u2011limit headers, and a JSON 429 response with `Retry-After`. Owned file: src/rateLimiter.js. Tested by sending >60 requests with supertest and asserting 429 and header."
+  },
+  {
+   "name": "router",
+   "path": "src/router.js",
+   "purpose": "Define the three public routes and their handlers, delegating to db and codeGenerator.",
+   "depends_on": [
+    "db",
+    "codeGenerator",
+    "rateLimiter",
+    "config"
+   ],
+   "contract": "Exports an Express `Router` instance with routes:\n- POST /shorten: validates JSON body `{url}`, checks scheme and length, generates a code via `codeGenerator.generateUniqueCode`, stores it with `db.insertLink`, and returns 201 JSON `{code, shortUrl, url}`.\n- GET /:code: validates `code` matches /^[0-9A-Za-z]{7}$/, looks up URL via `db.findUrlByCode`, redirects 302 or returns 404 JSON.\n- GET /healthz: returns 200 JSON `{status:\"ok\"}`.\nAll routes use `rateLimiter` middleware. Owned file: src/router.js. Tested with supertest covering success, validation errors, unknown code, and rate limit."
+  },
+  {
+   "name": "app",
+   "path": "src/app.js",
+   "purpose": "Create the Express application, apply global middleware, and mount the router.",
+   "depends_on": [
+    "router",
+    "rateLimiter",
+    "config"
+   ],
+   "contract": "Exports a function `createApp(): Express` that:\n- Instantiates Express.\n- Calls `app.set('trust proxy', config.trustProxy)`.\n- Uses `express.json()` for body parsing.\n- Applies `rateLimiter` globally.\n- Mounts `router` at `/`.\n- Returns the configured app instance. Owned file: src/app.js. Tested by creating the app and asserting middleware presence and route registration."
+  },
+  {
+   "name": "server",
+   "path": "src/server.js",
+   "purpose": "Entry point that starts the HTTP server on the configured port.",
+   "depends_on": [
+    "app",
+    "config"
+   ],
+   "contract": "When executed, imports `createApp` from `app`, calls it, and invokes `app.listen(config.port, () => console.log(...))`. No exported symbols. Owned file: src/server.js. Tested by spawning the server on an ephemeral port and performing a health check."
+  },
+  {
+   "name": "infra",
+   "path": "Dockerfile",
+   "purpose": "Provide a reproducible Docker image that runs the service as a non\u2011root user, exposes port 3000, and declares a data volume.",
+   "depends_on": [],
+   "contract": "Dockerfile uses node:lts-alpine, copies package*.json and src/, runs `npm ci --omit=dev`, creates user `node` (uid 1000), sets `WORKDIR /app`, `VOLUME /data`, `EXPOSE 3000`, and `CMD [\"node\",\"src/server.js\"]`. Includes a `.dockerignore` that excludes node_modules, test files, and git metadata. Also provides `docker-compose.yml` mounting a named volume to `/data`. Owned files: Dockerfile, .dockerignore, docker-compose.yml. Tested by building the image (`docker build .`) and running a container that responds to `/healthz`."
+  }
+ ],
+ "tasks": [
+  {
+   "id": "T1",
+   "title": "Implement config module",
+   "module": "config",
+   "prompt": "Create src/config.js that reads PORT, DB_PATH, BASE_URL, TRUST_PROXY from process.env, applies defaults (3000, '/data/shortener.db', undefined, false), parses numeric values, and exports a frozen `config` object.",
+   "tier": "standard",
+   "depends_on": [],
+   "acceptance": [
+    "src/config.js exists and exports a `config` constant.",
+    "Running `node -e \"console.log(require('./src/config').config.port)\"` prints the default 3000 when no env var is set.",
+    "Setting process.env.PORT=4000 changes the exported `config.port` to 4000."
+   ]
+  },
+  {
+   "id": "T2",
+   "title": "Implement SQLite DB module",
+   "module": "db",
+   "prompt": "Create src/db.js that imports `better-sqlite3`, uses `config.dbPath`, opens the DB in WAL mode, creates the `links` table if missing, and exports `init`, `insertLink`, and `findUrlByCode` as described in the contract.",
+   "tier": "standard",
+   "depends_on": [
+    "T1"
+   ],
+   "acceptance": [
+    "src/db.js exists and exports the three functions.",
+    "Calling `init()` creates the database file and the `links` table.",
+    "`insertLink('abc1234','https://example.com',1234567890)` stores a row without error.",
+    "`findUrlByCode('abc1234')` returns the stored URL."
+   ]
+  },
+  {
+   "id": "T3",
+   "title": "Implement code generator",
+   "module": "codeGenerator",
+   "prompt": "Create src/codeGenerator.js that exports async `generateUniqueCode()` using `crypto.randomInt` to build a 7\u2011char base62 string, checks uniqueness via `db.findUrlByCode`, retries up to 5 times, and throws on failure.",
+   "tier": "standard",
+   "depends_on": [
+    "T2"
+   ],
+   "acceptance": [
+    "src/codeGenerator.js exists and exports `generateUniqueCode`.",
+    "Calling the function returns a 7\u2011character string matching /^[0-9A-Za-z]{7}$/.",
+    "When `db.findUrlByCode` is mocked to always return a value, the function retries and eventually throws after 5 attempts."
+   ]
+  },
+  {
+   "id": "T4",
+   "title": "Implement rate limiter middleware",
+   "module": "rateLimiter",
+   "prompt": "Create src/rateLimiter.js that imports `express-rate-limit`, reads `config` for defaults, and exports a middleware limiting each IP to 60 requests per minute with JSON 429 response and `Retry-After` header.",
+   "tier": "standard",
+   "depends_on": [
+    "T1"
+   ],
+   "acceptance": [
+    "src/rateLimiter.js exists and exports a middleware function.",
+    "When applied to an Express app, the 61st request within a minute returns status 429 and a `Retry-After` header.",
+    "The response body is JSON with an `error` field."
+   ]
+  },
+  {
+   "id": "T5",
+   "title": "Implement router with endpoints",
+   "module": "router",
+   "prompt": "Create src/router.js that builds an Express Router, registers POST /shorten, GET /:code, and GET /healthz according to the contract, uses `rateLimiter` middleware, validates input, calls `codeGenerator` and `db` functions, and returns appropriate JSON responses.",
+   "tier": "deep",
+   "depends_on": [
+    "T2",
+    "T3",
+    "T4",
+    "T1"
+   ],
+   "acceptance": [
+    "src/router.js exists and exports an Express Router.",
+    "POST /shorten with a valid URL returns 201 and JSON containing a 7\u2011char `code` and correct `shortUrl`.",
+    "GET /:code with a known code redirects (302) to the original URL.",
+    "GET /:code with an unknown or malformed code returns 404 JSON.",
+    "GET /healthz returns 200 JSON `{status:\"ok\"}`."
+   ]
+  },
+  {
+   "id": "T6",
+   "title": "Create Express app factory",
+   "module": "app",
+   "prompt": "Create src/app.js that exports `createApp()` which builds an Express instance, sets `trust proxy` from config, installs `express.json()`, applies the global `rateLimiter`, mounts the router, and returns the app.",
+   "tier": "standard",
+   "depends_on": [
+    "T5",
+    "T4",
+    "T1"
+   ],
+   "acceptance": [
+    "src/app.js exists and exports a function `createApp`.",
+    "Calling `createApp()` returns an Express app with the three routes registered.",
+    "The app respects `config.trustProxy` when `app.get('trust proxy')` is inspected."
+   ]
+  },
+  {
+   "id": "T7",
+   "title": "Implement server entry point",
+   "module": "server",
+   "prompt": "Create src/server.js that imports `createApp` and `config`, calls `createApp()`, and starts listening on `config.port` with a console log.",
+   "tier": "light",
+   "depends_on": [
+    "T6"
+   ],
+   "acceptance": [
+    "src/server.js exists and can be executed with `node src/server.js`.",
+    "When run, the process prints a line containing the listening port.",
+    "A request to `http://localhost:<port>/healthz` returns 200 JSON `{status:\"ok\"}`."
+   ]
+  },
+  {
+   "id": "T8",
+   "title": "Add Docker infrastructure files",
+   "module": "infra",
+   "prompt": "Write a multi\u2011stage Dockerfile that builds the app on node:lts-alpine, installs only production dependencies, creates a non\u2011root user, sets `WORKDIR /app`, copies source, declares `VOLUME /data`, `EXPOSE 3000`, and runs `node src/server.js`. Also create .dockerignore (node_modules, test, *.log, .git) and docker\u2011compose.yml mounting a named volume to /data and exposing port 3000.",
+   "tier": "deep",
+   "depends_on": [
+    "T7"
+   ],
+   "acceptance": [
+    "Dockerfile exists and builds without errors (`docker build .`).",
+    "The built image runs (`docker run --rm -p 3000:3000 <image>`) and `/healthz` returns 200.",
+    ".dockerignore excludes node_modules and test files.",
+    "docker-compose.yml can bring up the service with `docker compose up -d`."
+   ]
+  },
+  {
+   "id": "T9",
+   "title": "Write README and LICENSE",
+   "module": "infra",
+   "prompt": "Create README.md that explains the project, environment variables, Docker build/run commands, curl examples, and notes about TRUST_PROXY. Add LICENSE file with MIT text, placeholder copyright holder 'pipez contributors' and current year.",
+   "tier": "light",
+   "depends_on": [
+    "T8"
+   ],
+   "acceptance": [
+    "README.md exists and contains sections: Overview, Configuration, API, Docker Usage, License.",
+    "LICENSE file contains the MIT license with the placeholder filled.",
+    "The repository root now includes both files."
+   ]
+  },
+  {
+   "id": "T10",
+   "title": "Add test suite",
+   "module": "app",
+   "prompt": "Create test/shortener.test.js using the built\u2011in `node:test` runner and `supertest`. Spin up the app with an in\u2011memory SQLite DB (use `:memory:` path via config override), and cover: successful shorten, code format, redirect, unknown code 404, invalid URL 400, and rate\u2011limit 429 on the 61st request.",
+   "tier": "standard",
+   "depends_on": [
+    "T5",
+    "T2",
+    "T1"
+   ],
+   "acceptance": [
+    "test/shortener.test.js exists and can be run with `npm test`.",
+    "All test cases pass (0 failures).",
+    "The rate\u2011limit test confirms the 61st request receives 429 and a Retry\u2011After header."
+   ]
+  },
+  {
+   "id": "T11",
+   "title": "Final verification build and test",
+   "module": "app",
+   "prompt": "Run the repository's build command and test command to ensure the project compiles, the Docker image builds, and the test suite passes.",
+   "tier": "deep",
+   "depends_on": [
+    "T10",
+    "T8"
+   ],
+   "acceptance": [
+    "Running the build command succeeds without errors.",
+    "Running the test command (`npm test`) reports all tests passing.",
+    "Docker image builds successfully (`docker build .`)."
+   ]
+  }
+ ],
+ "scaffold_commands": [
+  "npm init -y",
+  "npm install express better-sqlite3 express-rate-limit",
+  "npm install --save-dev supertest",
+  "mkdir -p src test",
+  "touch .gitignore && echo 'node_modules/' >> .gitignore && echo 'npm-debug.log' >> .gitignore"
+ ],
+ "build_command": "npm install",
+ "test_command": "npm test",
+ "deploy": {
+  "target": "none",
+  "install_commands": [],
+  "start_command": "",
+  "port": 0,
+  "health_path": "",
+  "env": [
+   {
+    "name": "PORT",
+    "value": ""
+   },
+   {
+    "name": "DB_PATH",
+    "value": ""
+   },
+   {
+    "name": "BASE_URL",
+    "value": ""
+   },
+   {
+    "name": "TRUST_PROXY",
+    "value": ""
+   }
+  ]
+ }
+}

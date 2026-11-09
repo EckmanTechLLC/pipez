@@ -47,7 +47,8 @@ async def test_think_stripped_and_usage():
 
     out, usage = await provider(handler).complete("s", "p", SCHEMA, TIER)
     assert out == {"a": "y"}
-    assert usage == {"input_tokens": 7, "output_tokens": 3, "model": "qwen3-served"}
+    assert usage == {"input_tokens": 7, "output_tokens": 3, "model": "qwen3-served",
+                     "structured": "json_schema"}
 
 
 async def test_length_is_truncated_error():

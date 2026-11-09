@@ -304,3 +304,94 @@ def test_agreement_plan():
     c = bench_local.agreement_plan(out, {"plan": stored}, {"tasks": [task(1)] * 2,
                                                           "deploy": {"target": "none"}})
     assert c["task_count_delta"] == 0 and c["deploy_target_match"] is True
+
+
+# ---- plan-gate metrics and gate rounds (stub planner, no network) ----------
+def _gate_plan(bad=True):
+    """Two modules; with bad=True the consumer's task has no dependency on
+    the provider's (a dep_coverage error)."""
+    return {"architecture": "a", "stack": [], "repo_layout": "",
+            "scaffold_commands": [], "build_command": "", "test_command": "t",
+            "deploy": {"target": "none"},
+            "modules": [
+                {"name": "core", "depends_on": [], "files": ["core.py"],
+                 "contract": "Provides `make_thing(size)` returning a Thing."},
+                {"name": "app", "depends_on": ["core"], "files": ["app.py"],
+                 "contract": "Provides `run_app()`; calls `make_thing(size)`."}],
+            "tasks": [
+                {"id": "T1", "title": "Core", "module": "core", "depends_on": [],
+                 "tier": "light", "prompt": "Implement make_thing(size) in core.py. " * 20,
+                 "acceptance": "pytest passes"},
+                {"id": "T2", "title": "App", "module": "app",
+                 "depends_on": [] if bad else ["T1"], "tier": "light",
+                 "prompt": "Implement run_app in app.py using the core module. " * 20,
+                 "acceptance": "pytest passes"}]}
+
+
+class _StubLLM:
+    def __init__(self, plans):
+        self.plans, self.prompts = list(plans), []
+        self.intake = self.brief = None     # one_call looks every stage up
+
+    async def plan(self, system, prompt, tier):
+        self.prompts.append(prompt)
+        plan = self.plans.pop(0) if len(self.plans) > 1 else self.plans[0]
+        if isinstance(plan, Exception):
+            raise plan
+        return plan, {"input_tokens": 10, "output_tokens": 5}
+
+
+async def _gate_call(tmp_path, plans, rounds):
+    db, engine = _engine(tmp_path)
+    run = {"id": "r1", "request": "req", "context": "", "brief": "brief",
+           "plan": _gate_plan(bad=False), "plan_meta": {}}
+    llm = _StubLLM(plans)
+    rec = await bench_local.one_call(
+        llm, "plan", "light", "sys", "prompt", run, engine=engine,
+        gate_rounds=rounds, save_output=True)
+    return rec, llm
+
+
+async def test_bench_gate_metrics(tmp_path):
+    rec, llm = await _gate_call(tmp_path, [_gate_plan(bad=True)], 0)
+    assert len(llm.prompts) == 1
+    assert rec["gate_errors"] == 1 and rec["gate_codes"] == ["dep_coverage"]
+    assert rec["ref_gate_errors"] == 0
+    assert rec["gate_violations"] and "gate_rounds_used" not in rec
+
+
+async def test_bench_gate_round_fixes(tmp_path):
+    rec, llm = await _gate_call(
+        tmp_path, [_gate_plan(bad=True), _gate_plan(bad=False)], 2)
+    assert len(llm.prompts) == 2
+    assert "AUTOMATED PLAN GATE" in llm.prompts[1]
+    assert rec["gate_rounds_used"] == 1 and rec["gate_passed"] is True
+    assert rec["gate_round_errors"] == [1, 0] and rec["gate_errors"] == 0
+    assert rec["input_tokens"] == 20 and rec["output_tokens"] == 10
+    assert rec["output"] == _gate_plan(bad=True)
+    assert rec["final_output"] == _gate_plan(bad=False)
+    assert len(rec["round_outputs"]) == 2
+
+
+async def test_bench_gate_round_keeps_failing(tmp_path):
+    rec, llm = await _gate_call(tmp_path, [_gate_plan(bad=True)], 2)
+    assert len(llm.prompts) == 3
+    assert rec["gate_rounds_used"] == 2 and rec["gate_passed"] is False
+    assert rec["gate_round_errors"] == [1, 1, 1]
+
+
+async def test_bench_gate_round_error(tmp_path):
+    rec, llm = await _gate_call(
+        tmp_path, [_gate_plan(bad=True), RuntimeError("boom")], 2)
+    assert rec["gate_passed"] is False and "boom" in rec["gate_round_error"]
+    assert rec["gate_rounds_used"] == 0
+
+
+def test_bench_plan_table_gate_columns():
+    r = {"stage": "plan", "tier": "t", "ok": True, "seconds": 1.0, "cost": 0.1,
+         "output_tokens": 5, "tasks": 2, "task_count_delta": 0,
+         "deploy_target_match": True, "scaffold_forbidden": False,
+         "gate_errors": 1, "ref_gate_errors": 0, "gate_rounds_used": 1,
+         "gate_passed": True}
+    out = bench_local.plan_table([r])
+    assert "gate-err" in out and "ref-err" in out and "pass%" in out and "rounds" in out

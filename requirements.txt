@@ -1,3 +1,4 @@
 anthropic>=1.13
 fastapi==0.143.1
 uvicorn==0.54.0
+jsonschema>=4.23

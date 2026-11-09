@@ -1,0 +1,250 @@
+{
+ "architecture": "# Architecture\n\n## Components\n\n1. **Server Entry (`src/index.js`)**: Bootstraps the Express app, initializes the database, and starts the HTTP listener. It is the only file that calls `app.listen()`.\n2. **App Factory (`src/app.js`)**: Configures Express middleware (rate limiting, trust proxy, JSON parsing) and mounts route handlers. It exports the `app` instance for testing without starting the server.\n3. **Database Module (`src/db.js`)**: Wraps `better-sqlite3`. Handles connection, schema initialization (WAL mode, `links` table), and raw SQL execution. It owns the SQLite file lifecycle.\n4. **Shortener Logic (`src/shortener.js`)**: Contains the business logic for generating random 7-character base62 codes, checking for collisions, and inserting records into the database. It handles the retry logic for collisions.\n5. **Routes (`src/routes.js`)**: Defines the Express routes (`POST /shorten`, `GET /:code`, `GET /healthz`). It delegates code generation to `shortener.js` and lookups to `db.js`.\n\n## Data Flow\n\n1. **Request In**: Client sends HTTP request to port 3000.\n2. **Rate Limiting**: `express-rate-limit` middleware checks the client IP (resolved via `TRUST_PROXY` config). If limit exceeded, returns 429 immediately.\n3. **Routing**: Express matches the URL path.\n   - `GET /healthz`: Returns 200 `{\"status\":\"ok\"}`.\n   - `POST /shorten`: Extracts `url` from JSON body. Validates URL format/scheme. Calls `shortener.js` to generate a unique code. Calls `db.js` to insert the record. Returns 201 with the short URL details.\n   - `GET /:code`: Validates code format (7 chars, base62). Calls `db.js` to lookup the code. If found, returns 302 redirect. If not found, returns 404.\n4. **Database**: `db.js` interacts with the SQLite file (`DB_PATH`). All writes are synchronous via `better-sqlite3`.\n\n## Key Decisions Honored\n\n- **Node.js/Express**: Used as the runtime and framework.\n- **SQLite/better-sqlite3**: Single file storage, no server process. WAL mode enabled for performance.\n- **Rate Limiting**: 60 req/min per IP using `express-rate-limit`. Configurable `TRUST_PROXY`.\n- **Short Codes**: 7 chars, base62, random generation with collision retry (max 5).\n- **Docker**: Multi-stage build only if necessary (better-sqlite3 requires compilation, so we use a build stage with build tools and a runtime stage with alpine/slim). Non-root user. Port 3000.\n- **No Auth/Telemetry**: No user accounts, no third-party calls.\n- **MIT License**: Included.\n- **Testing**: `node:test` + `supertest`. App factory exported for testability. Temp DB used in tests.\n- **No CI**: No GitHub Actions or CI config.\n- **Retention**: Links kept forever. README notes file growth.\n",
+ "stack": [
+  "Node.js LTS (Alpine/Slim)",
+  "Express",
+  "better-sqlite3",
+  "express-rate-limit",
+  "node:test",
+  "supertest"
+ ],
+ "repo_layout": "```\npipez-url-shortener/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 index.js\n\u2502   \u251c\u2500\u2500 app.js\n\u2502   \u251c\u2500\u2500 db.js\n\u2502   \u251c\u2500\u2500 shortener.js\n\u2502   \u2514\u2500\u2500 routes.js\n\u251c\u2500\u2500 test/\n\u2502   \u251c\u2500\u2500 app.test.js\n\u2502   \u2514\u2500\u2500 db.test.js\n\u251c\u2500\u2500 Dockerfile\n\u251c\u2500\u2500 .dockerignore\n\u251c\u2500\u2500 docker-compose.yml\n\u251c\u2500\u2500 package.json\n\u251c\u2500\u2500 package-lock.json\n\u251c\u2500\u2500 README.md\n\u251c\u2500\u2500 LICENSE\n\u2514\u2500\u2500 .gitignore\n```",
+ "modules": [
+  {
+   "name": "db",
+   "path": "src/db.js",
+   "purpose": "Initialize and manage the SQLite database connection, schema, and raw queries.",
+   "depends_on": [],
+   "contract": "Public Interface: `initDb(dbPath)`: returns a DB instance. `insertLink(code, url)`: inserts a link. `getLink(code)`: retrieves a link by code. `close()`: closes the connection. Files Owned: `src/db.js`. Testing: Unit tests in `test/db.test.js` using an in-memory SQLite database (`:memory:`) to verify schema creation and query correctness."
+  },
+  {
+   "name": "shortener",
+   "path": "src/shortener.js",
+   "purpose": "Generate unique 7-character base62 short codes and handle collision retries.",
+   "depends_on": [],
+   "contract": "Public Interface: `generateCode(db)`: generates a random code and attempts to insert it into the provided DB instance. Returns the code on success, throws on failure after 5 retries. Files Owned: `src/shortener.js`. Testing: Unit tests in `test/shortener.test.js` mocking the DB insert to simulate collisions and verify retry logic."
+  },
+  {
+   "name": "routes",
+   "path": "src/routes.js",
+   "purpose": "Define Express route handlers for /shorten, /:code, and /healthz.",
+   "depends_on": [
+    "db",
+    "shortener"
+   ],
+   "contract": "Public Interface: `registerRoutes(app, db)`: mounts routes on the Express app instance. Files Owned: `src/routes.js`. Testing: Integration tests in `test/app.test.js` using supertest to verify HTTP responses (status codes, headers, body) for valid/invalid inputs."
+  },
+  {
+   "name": "app",
+   "path": "src/app.js",
+   "purpose": "Configure Express middleware (rate limiting, trust proxy) and mount routes.",
+   "depends_on": [
+    "routes"
+   ],
+   "contract": "Public Interface: `createApp()`: returns an Express app instance configured with middleware and routes. Files Owned: `src/app.js`. Testing: The app instance is tested via `test/app.test.js` which imports `createApp` and runs supertest against it."
+  },
+  {
+   "name": "server",
+   "path": "src/index.js",
+   "purpose": "Entry point that initializes the DB, creates the app, and starts the HTTP server.",
+   "depends_on": [
+    "app",
+    "db"
+   ],
+   "contract": "Public Interface: Exports nothing (runs as script). Files Owned: `src/index.js`. Testing: Not directly tested via unit tests, but verified by the Docker build and manual run."
+  }
+ ],
+ "tasks": [
+  {
+   "id": "T1",
+   "title": "Initialize Project Structure and Dependencies",
+   "module": "server",
+   "prompt": "Initialize the Node.js project. Create package.json with dependencies (express, better-sqlite3, express-rate-limit) and devDependencies (supertest, node:test is built-in). Create the directory structure (src/, test/). Create the MIT LICENSE file. Create .gitignore. Create README.md with placeholder content. Create Dockerfile, .dockerignore, docker-compose.yml.",
+   "tier": "light",
+   "depends_on": [],
+   "acceptance": [
+    "package.json exists with correct dependencies and license field.",
+    "LICENSE file exists with MIT text.",
+    "Directory structure src/ and test/ exists.",
+    "Dockerfile, .dockerignore, docker-compose.yml exist."
+   ]
+  },
+  {
+   "id": "T2",
+   "title": "Implement Database Module",
+   "module": "db",
+   "prompt": "Implement src/db.js. It should export `initDb(dbPath)` which opens the SQLite database, enables WAL mode, and creates the `links` table if not exists. It should export `insertLink(code, url)` and `getLink(code)`. It should export `close()`.",
+   "tier": "standard",
+   "depends_on": [
+    "T1"
+   ],
+   "acceptance": [
+    "src/db.js exists.",
+    "initDb creates the links table with correct schema.",
+    "insertLink inserts a record.",
+    "getLink retrieves a record.",
+    "WAL mode is enabled."
+   ]
+  },
+  {
+   "id": "T3",
+   "title": "Implement Shortener Logic",
+   "module": "shortener",
+   "prompt": "Implement src/shortener.js. It should export `generateCode(db)`. This function generates a random 7-character base62 code using crypto.randomInt. It attempts to insert the code into the DB. If a unique constraint error occurs, it retries up to 5 times. If it fails after 5 retries, it throws an error.",
+   "tier": "standard",
+   "depends_on": [
+    "T1"
+   ],
+   "acceptance": [
+    "src/shortener.js exists.",
+    "generateCode produces 7-char base62 codes.",
+    "Retries on collision up to 5 times.",
+    "Throws on persistent collision."
+   ]
+  },
+  {
+   "id": "T4",
+   "title": "Implement Routes",
+   "module": "routes",
+   "prompt": "Implement src/routes.js. It should export `registerRoutes(app, db)`. It should define POST /shorten (validates URL, generates code, inserts link, returns 201), GET /:code (validates code format, looks up link, returns 302 or 404), and GET /healthz (returns 200 {status: 'ok'}).",
+   "tier": "standard",
+   "depends_on": [
+    "T2",
+    "T3"
+   ],
+   "acceptance": [
+    "src/routes.js exists.",
+    "POST /shorten validates URL and returns 201.",
+    "GET /:code returns 302 for valid codes.",
+    "GET /:code returns 404 for invalid/unknown codes.",
+    "GET /healthz returns 200."
+   ]
+  },
+  {
+   "id": "T5",
+   "title": "Implement App Factory",
+   "module": "app",
+   "prompt": "Implement src/app.js. It should export `createApp()`. This function creates an Express app, configures trust proxy from TRUST_PROXY env var, sets up rate limiting (60 req/min per IP), parses JSON, and registers routes using `registerRoutes` from the routes module.",
+   "tier": "standard",
+   "depends_on": [
+    "T4"
+   ],
+   "acceptance": [
+    "src/app.js exists.",
+    "createApp returns an Express app.",
+    "Rate limiting is configured.",
+    "Trust proxy is configured from env.",
+    "Routes are registered."
+   ]
+  },
+  {
+   "id": "T6",
+   "title": "Implement Server Entry Point",
+   "module": "server",
+   "prompt": "Implement src/index.js. It should initialize the database using `initDb` (from DB_PATH env var, default /data/shortener.db), create the app using `createApp`, and start listening on PORT env var (default 3000).",
+   "tier": "light",
+   "depends_on": [
+    "T5",
+    "T2"
+   ],
+   "acceptance": [
+    "src/index.js exists.",
+    "Server starts on correct port.",
+    "Database is initialized on startup."
+   ]
+  },
+  {
+   "id": "T7",
+   "title": "Write Database Tests",
+   "module": "db",
+   "prompt": "Write test/db.test.js. Use node:test and supertest (or plain fetch) to test the DB module. Test schema creation, insert, and retrieval using an in-memory database.",
+   "tier": "light",
+   "depends_on": [
+    "T2"
+   ],
+   "acceptance": [
+    "test/db.test.js exists.",
+    "Tests pass for insert and retrieval."
+   ]
+  },
+  {
+   "id": "T8",
+   "title": "Write Shortener Tests",
+   "module": "shortener",
+   "prompt": "Write test/shortener.test.js. Test code generation and collision retry logic. Mock the DB insert method to simulate collisions.",
+   "tier": "light",
+   "depends_on": [
+    "T3"
+   ],
+   "acceptance": [
+    "test/shortener.test.js exists.",
+    "Tests pass for collision retry."
+   ]
+  },
+  {
+   "id": "T9",
+   "title": "Write Integration Tests",
+   "module": "routes",
+   "prompt": "Write test/app.test.js. Use supertest to test the full app. Cover: shorten success, code is 7 chars, redirect works, unknown code 404, invalid URL 400, rate limit 429.",
+   "tier": "standard",
+   "depends_on": [
+    "T6",
+    "T7",
+    "T8"
+   ],
+   "acceptance": [
+    "test/app.test.js exists.",
+    "All specified scenarios are tested.",
+    "Tests pass."
+   ]
+  },
+  {
+   "id": "T10",
+   "title": "Configure Docker and Compose",
+   "module": "server",
+   "prompt": "Finalize Dockerfile (multi-stage if needed for better-sqlite3, non-root user, expose 3000, volume /data). Finalize .dockerignore. Finalize docker-compose.yml with named volume. Update README.md with run instructions and env var docs.",
+   "tier": "light",
+   "depends_on": [
+    "T6"
+   ],
+   "acceptance": [
+    "Dockerfile builds successfully.",
+    "docker-compose.yml is valid.",
+    "README.md has run instructions."
+   ]
+  },
+  {
+   "id": "T11",
+   "title": "Verify Build and Tests",
+   "module": "server",
+   "prompt": "Run npm install. Run npm test. Ensure all tests pass. Build the Docker image. Run the container and verify healthz endpoint.",
+   "tier": "light",
+   "depends_on": [
+    "T10",
+    "T9"
+   ],
+   "acceptance": [
+    "npm test passes.",
+    "Docker image builds.",
+    "Container starts and healthz returns 200."
+   ]
+  }
+ ],
+ "scaffold_commands": [
+  "mkdir -p pipez-url-shortener/src pipez-url-shortener/test",
+  "cd pipez-url-shortener",
+  "npm init -y",
+  "npm install express better-sqlite3 express-rate-limit",
+  "npm install --save-dev supertest"
+ ],
+ "build_command": "npm test",
+ "test_command": "npm test",
+ "deploy": {
+  "target": "none",
+  "install_commands": [],
+  "start_command": "",
+  "port": 0,
+  "health_path": "",
+  "env": []
+ }
+}
